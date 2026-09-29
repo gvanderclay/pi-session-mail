@@ -561,6 +561,25 @@ test("an injected reply does not trigger a turn; an injected request still does"
 	assert.deepEqual(a.sent[0].options, { deliverAs: "followUp" });
 });
 
+test("a sent/ file whose name matches but whose envelope id differs is not quoted", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.mailbox(`${b.id} the real request`);
+	const [request] = envelopes(a.id, "sent");
+	const [copy] = files(a.id, "sent");
+	// An old file can end in the same `-<id>.json`, so the parsed id still decides.
+	const decoy = { ...request, id: "33333333-3333-4333-8333-333333333333", body: "the decoy" };
+	writeFileSync(join(box(a.id, "sent"), `000000000000000-${request.id}.json`), JSON.stringify(decoy));
+	await b.start();
+	await b.answer("answer");
+	await a.start();
+	await a.shutdown();
+	await b.shutdown();
+	const text = a.sent[0].message.content;
+	assert.ok(text.includes(join(box(a.id, "sent"), copy)), text);
+	assert.ok(!text.includes("the decoy"), text);
+});
+
 // ---------------------------------------------------------------------------
 // pi.events interface (ticket 04)
 

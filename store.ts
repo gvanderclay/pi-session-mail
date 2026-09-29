@@ -130,14 +130,14 @@ export function readEnvelope(path: string): Envelope {
 
 /**
  * Find this session's `sent/` copy of the request with envelope id `id`;
- * undefined when no readable copy exists. Called while claiming a reply, so a
- * reply can quote the request it answers without another package's files.
+ * undefined when no readable copy exists. Only names matching the id are read,
+ * because `sent/` is never pruned and grows with the address's age.
  */
 export function findSent(address: string, id: string): SentCopy | undefined {
 	const dir = boxPath(address, "sent");
 	let names: string[];
 	try {
-		names = readdirSync(dir).filter((name) => name.endsWith(".json"));
+		names = readdirSync(dir).filter((name) => name.endsWith(`-${id}.json`));
 	} catch {
 		return undefined;
 	}
