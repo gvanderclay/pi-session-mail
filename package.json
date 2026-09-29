@@ -1,5 +1,5 @@
 {
-	"name": "pi-herald",
+	"name": "pi-session-mail",
 	"version": "0.1.0",
 	"description": "A file mailbox between Pi sessions on the same machine",
 	"keywords": [

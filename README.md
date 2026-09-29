@@ -1,7 +1,7 @@
 # mailbox
 
 A file mailbox between Pi sessions on the same machine. The npm package is
-`pi-herald`.
+`pi-session-mail`.
 
 Every session has an address — its session id — and an inbox under
 `<agent dir>/mailbox/<address>/{tmp,new,cur,sent}/`. `/mailbox` shows this
@@ -33,7 +33,7 @@ pi install <path to this directory>
 Once it is published, install it by name instead:
 
 ```bash
-pi install npm:pi-herald
+pi install npm:pi-session-mail
 ```
 
 The package has no dependencies and no build step. The `pi` manifest loads only
