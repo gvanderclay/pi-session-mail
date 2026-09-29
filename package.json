@@ -1,12 +1,21 @@
 {
-	"name": "mailbox",
-	"private": true,
+	"name": "pi-herald",
+	"version": "0.1.0",
+	"description": "A file mailbox between Pi sessions on the same machine",
+	"keywords": [
+		"pi-package"
+	],
 	"type": "module",
 	"pi": {
 		"extensions": [
 			"./index.ts"
 		]
 	},
+	"files": [
+		"index.ts",
+		"store.ts",
+		"README.md"
+	],
 	"scripts": {
 		"test": "node --test test/*.test.ts"
 	},

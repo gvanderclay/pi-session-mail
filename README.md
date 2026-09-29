@@ -1,6 +1,7 @@
 # mailbox
 
-A file mailbox between Pi sessions on the same machine.
+A file mailbox between Pi sessions on the same machine. The npm package is
+`pi-herald`.
 
 Every session has an address — its session id — and an inbox under
 `<agent dir>/mailbox/<address>/{tmp,new,cur,sent}/`. `/mailbox` shows this
@@ -23,8 +24,15 @@ import this package or read its files.
 pi install <path to this directory>
 ```
 
-The package has no dependencies and no build step. Its tests are not part of
-an install.
+Once it is published, install it by name instead:
+
+```bash
+pi install npm:pi-herald
+```
+
+The package has no dependencies and no build step. The `pi` manifest loads only
+`./index.ts`, and the tests under `test/` are neither loaded by Pi nor included
+in the npm tarball.
 
 ## Requirements
 
