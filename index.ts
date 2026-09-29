@@ -9,7 +9,9 @@
 // queued follow-ups) get a `failed` reply instead. Replies are never answered.
 // Other extensions use `pi.events` (below).
 //
-// Spec: .scratch/pi-mailbox/spec.md
+// Specs: .scratch/pi-mailbox/spec.md (the mailbox itself) and
+// .scratch/pi-delegate/spec.md (the `message:*` hooks and this package's
+// shape). The hook contracts live in this package's README.
 import { type FSWatcher, watch } from "node:fs";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -51,15 +53,15 @@ function inboundText(envelope: Envelope, path: string): string {
  * `pi.events` channels. Both rely on Pi's event bus running a listener's
  * synchronous code before `emit` returns; do all work before any `await`.
  *
- * - `mailbox:send`: the caller emits `{ to, body }`; `mailbox` writes a
+ * - `message:send`: the caller emits `{ to, body }`; `mailbox` writes a
  *   request and sets `envelope` (or `error`) on the same object. Neither set
- *   means `mailbox` is not installed.
- * - `mailbox:inbound`: emitted for every claimed envelope, requests and
+ *   means no provider is installed.
+ * - `message:inbound`: emitted for every claimed envelope, requests and
  *   replies alike, before injection; a listener sets `handled` to show it
  *   itself.
  */
-const SEND = "mailbox:send";
-const INBOUND = "mailbox:inbound";
+const SEND = "message:send";
+const INBOUND = "message:inbound";
 
 type SendPayload = { to: unknown; body: unknown; envelope?: Envelope; error?: string };
 type InboundPayload = { envelope: Envelope; path: string; handled: boolean };
