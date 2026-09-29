@@ -121,10 +121,11 @@ assert.equal(probe.error, undefined);
 and replies alike.
 
 `mailbox` never emits it from inside a `session_start` handler. Mail waiting
-when a session starts is claimed on a later event-loop turn, after every
-extension's `session_start` has run, so a listener that rebuilds its state
-synchronously in its own `session_start` sees that mail whatever the load
-order. The watcher and the poll timer deliver later mail as usual.
+when a session starts is claimed on a later event-loop turn (`setImmediate`),
+so a listener that rebuilds its state synchronously in its own `session_start`
+sees that mail, whether it loads before or after `mailbox`. The one exception
+is an extension loaded between the two whose `session_start` waits on I/O:
+the claim can then run before the listener's handler. The watcher and the poll timer deliver later mail as usual.
 
 | Field | Meaning |
 | --- | --- |

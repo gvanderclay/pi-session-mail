@@ -268,10 +268,10 @@ export default function mailbox(pi: ExtensionAPI) {
 		address = id;
 		ensureBoxes(id);
 		updateStatus();
-		// Mail already waiting is claimed on the next event-loop turn, after
-		// every extension's `session_start` handler has run (the runner awaits
-		// each in load order), so a listener that rebuilds its state there sees
-		// it whatever the load order. The watcher and poll timer keep delivering
+		// Mail already waiting is claimed on the next event-loop turn. The
+		// runner awaits each `session_start` handler in load order, so every
+		// later handler that does not wait on I/O runs first, and a listener
+		// that rebuilds its state there sees the mail. The watcher and poll timer keep delivering
 		// later mail. A microtask would still run before the next handler.
 		pendingScan = setImmediate(() => {
 			pendingScan = undefined;
