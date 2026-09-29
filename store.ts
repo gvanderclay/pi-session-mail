@@ -53,8 +53,9 @@ const fileName = (ms: number, id: string) => `${String(ms).padStart(15, "0")}-${
  * Write an envelope to `to`'s inbox: into its `tmp/`, then renamed into its
  * `new/`. A request is also copied into the sender's `sent/`. Synchronous,
  * so a `pi.events` caller sees the result as soon as `emit` returns.
+ * A reply's `status` is `done` unless given; a request's is empty.
  */
-export function send(from: string, to: string, body: string, inReplyTo: string[] = []): Envelope {
+export function send(from: string, to: string, body: string, inReplyTo: string[] = [], status = "done"): Envelope {
 	if (!isAddress(from)) throw new Error(`invalid sender address: ${JSON.stringify(from)}`);
 	if (!isAddress(to)) throw new Error(`invalid address: ${JSON.stringify(to)} (expected a session id)`);
 	const ms = stamp();
@@ -63,7 +64,7 @@ export function send(from: string, to: string, body: string, inReplyTo: string[]
 		from,
 		to,
 		in_reply_to: inReplyTo,
-		status: inReplyTo.length > 0 ? "done" : "",
+		status: inReplyTo.length > 0 ? status : "",
 		ts: new Date(ms).toISOString(),
 		body,
 	};

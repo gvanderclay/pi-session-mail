@@ -5,7 +5,9 @@
 // `/mailbox <address> <text>` sends a request. Mail in the inbox is claimed
 // into `cur/` and injected as a follow-up that names the sending session.
 // When the recipient settles, its last answer goes back to each sender as one
-// reply; replies are never answered. Other extensions use `pi.events` (below).
+// `done` reply; requests that never entered the conversation (an abort drops
+// queued follow-ups) get a `failed` reply instead. Replies are never answered.
+// Other extensions use `pi.events` (below).
 //
 // Spec: .scratch/pi-mailbox/spec.md
 import { type FSWatcher, watch } from "node:fs";
@@ -22,6 +24,8 @@ const POLL_MS = 1000;
 const BODY_CAP = 32 * 1024;
 /** Reply body when the run ended with no assistant text. */
 const NO_ANSWER = "(The session settled with no answer text.)";
+/** Body of a `failed` reply to requests that never entered the conversation. */
+const UNSEEN = "(The session was stopped before it read the message. Nothing was done; send it again if it is still needed.)";
 
 /** Cut `body` to at most BODY_CAP bytes on a character boundary; undefined when it fits. */
 function cap(body: string): string | undefined {
@@ -36,6 +40,8 @@ function inboundText(envelope: Envelope, path: string): string {
 	const header = [`[mailbox] Message from another Pi session at ${envelope.from}, not from the user.`];
 	if (envelope.in_reply_to.length > 0)
 		header.push(`It is a reply to your request${envelope.in_reply_to.length > 1 ? "s" : ""} ${envelope.in_reply_to.join(", ")}.`);
+	if (envelope.in_reply_to.length > 0 && envelope.status !== "done")
+		header.push(`Its status is "${envelope.status}", not "done": it is not an answer.`);
 	const cut = cap(envelope.body);
 	const body = cut === undefined ? envelope.body : `${cut}\n\n[mailbox] Body cut at 32 KiB; the full envelope is ${path}`;
 	return `${header.join(" ")}\n\n${body}`;
@@ -88,6 +94,8 @@ export default function mailbox(pi: ExtensionAPI) {
 	const delivered = new Set<string>();
 	/** Request ids awaiting this session's reply, keyed by sender. In memory only. */
 	let owed = new Map<string, string[]>();
+	/** Owed request ids whose message entered the conversation (or a listener took over). */
+	let seen = new Set<string>();
 	/** Text of the last assistant message, remembered at `agent_end`. */
 	let lastAnswer: string | undefined;
 	/** Messages injected since the last settle, for the status's pending count. */
@@ -124,10 +132,14 @@ export default function mailbox(pi: ExtensionAPI) {
 		// Only requests arm a reply, so replies are never answered. A request
 		// arms one even when a listener took over its display.
 		if (envelope.in_reply_to.length === 0) owed.set(envelope.from, [...(owed.get(envelope.from) ?? []), envelope.id]);
-		if (inbound.handled) return;
+		// `mailbox` cannot observe a listener's own message, so a takeover counts as seen.
+		if (inbound.handled) {
+			seen.add(envelope.id);
+			return;
+		}
 		injected++;
 		pi.sendMessage(
-			{ customType: CUSTOM_TYPE, content: inboundText(envelope, path), display: true },
+			{ customType: CUSTOM_TYPE, content: inboundText(envelope, path), display: true, details: { id: envelope.id } },
 			{ triggerTurn: true, deliverAs: "followUp" },
 		);
 	}
@@ -172,6 +184,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		stop();
 		ctx = context;
 		owed = new Map();
+		seen = new Set();
 		lastAnswer = undefined;
 		injected = 0;
 		const id = context.sessionManager.getSessionId();
@@ -195,6 +208,14 @@ export default function mailbox(pi: ExtensionAPI) {
 		timer.unref?.();
 	});
 
+	// An injected message counts as seen only once it enters the conversation;
+	// stopping a run drops queued follow-ups without a trace.
+	pi.on("message_end", async (event) => {
+		const message = event.message as { role?: string; customType?: string; details?: { id?: unknown } };
+		if (message?.role !== "custom" || message.customType !== CUSTOM_TYPE) return;
+		if (typeof message.details?.id === "string") seen.add(message.details.id);
+	});
+
 	pi.on("agent_end", async (event) => {
 		lastAnswer = lastAssistantText(event.messages);
 	});
@@ -205,13 +226,18 @@ export default function mailbox(pi: ExtensionAPI) {
 		const me = address;
 		const body = lastAnswer ?? NO_ANSWER;
 		const replies = owed;
+		const read = seen;
 		owed = new Map();
+		seen = new Set();
 		lastAnswer = undefined;
 		injected = 0;
 		if (me === undefined) return;
 		for (const [to, ids] of replies) {
+			const done = ids.filter((id) => read.has(id));
+			const failed = ids.filter((id) => !read.has(id));
 			try {
-				send(me, to, body, ids);
+				if (done.length > 0) send(me, to, body, done);
+				if (failed.length > 0) send(me, to, UNSEEN, failed, "failed");
 			} catch (err) {
 				warn(`could not reply to ${to}: ${(err as Error).message}`);
 			}
