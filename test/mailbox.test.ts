@@ -75,6 +75,7 @@ function session(sessionId: string, opts: { hasUI?: boolean } = {}) {
 	};
 	return {
 		id: sessionId,
+		pi,
 		events,
 		sent,
 		notes,
@@ -87,7 +88,13 @@ function session(sessionId: string, opts: { hasUI?: boolean } = {}) {
 			dropping = on;
 		},
 		mailbox: (args: string) => commands.mailbox(args, ctx),
-		start: (reason = "startup") => fire("session_start", { reason }),
+		/** The session is up: run the `session_start` handlers and let the first, deferred scan run. */
+		start: async (reason = "startup") => {
+			await fire("session_start", { reason });
+			await turn();
+		},
+		/** Run only the `session_start` handlers, to watch what happens inside them. */
+		sessionStart: (reason = "startup") => fire("session_start", { reason }),
 		shutdown: () => fire("session_shutdown"),
 		/** One agent run ending with `text` as the last assistant message, then settling; `aborted` marks a run the user stopped. */
 		answer: async (text?: string, opts: { aborted?: boolean } = {}) => {
@@ -119,6 +126,9 @@ async function until(check: () => boolean, what: string, ms = 4000) {
 		await new Promise((r) => setTimeout(r, 25));
 	}
 }
+
+/** The event-loop turn after `session_start`, where `mailbox` claims mail already waiting. */
+const turn = () => new Promise((resolve) => setImmediate(resolve));
 
 // ---------------------------------------------------------------------------
 // Addressing and sending (ticket 01)
@@ -207,6 +217,52 @@ test("messages are delivered in send order", async () => {
 		b.sent.map((s) => s.message.content.split("\n").at(-1)),
 		["first", "second", "third"],
 	);
+});
+
+test("mail waiting at session start is claimed after a turn, never inside session_start", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.mailbox(`${b.id} waiting`);
+	const seen: unknown[] = [];
+	b.events.on("message:inbound", (payload) => void seen.push(payload));
+	await b.sessionStart();
+	assert.deepEqual(seen, [], "nothing is emitted inside session_start");
+	assert.equal(b.sent.length, 0, "nothing is injected inside session_start");
+	await turn();
+	assert.equal(seen.length, 1);
+	assert.equal(b.sent.length, 1);
+	assert.match(b.sent[0].message.content, /waiting$/);
+	await b.shutdown();
+});
+
+test("a listener that rebuilds state in a later extension's session_start sees waiting mail", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.mailbox(`${b.id} waiting`);
+	let restored = false;
+	const seen: unknown[] = [];
+	// Registered after `mailbox`'s own handler, as a later extension's would be.
+	b.pi.on("session_start", () => {
+		restored = true;
+	});
+	b.events.on("message:inbound", (payload) => {
+		if (restored) seen.push(payload);
+	});
+	await b.sessionStart();
+	await turn();
+	assert.equal(seen.length, 1, "the listener had already rebuilt its state");
+	await b.shutdown();
+});
+
+test("shutdown cancels a scan deferred to the next turn", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.mailbox(`${b.id} too late`);
+	await b.sessionStart();
+	await b.shutdown();
+	await turn();
+	assert.deepEqual(b.sent, [], "the deferred scan never runs");
+	assert.equal(files(b.id, "new").length, 1, "the mail stays on disk");
 });
 
 test("a body over 32 KiB is cut, with the envelope's cur/ path; a smaller one passes whole", async () => {

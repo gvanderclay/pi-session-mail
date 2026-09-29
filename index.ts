@@ -179,11 +179,18 @@ export default function mailbox(pi: ExtensionAPI) {
 		ctx.ui.setStatus(STATUS_KEY, parts.length > 0 ? `✉ ${parts.join(" · ")}` : undefined);
 	}
 
+	/** A first scan deferred to the next event-loop turn; see `session_start`. */
+	let pendingScan: ReturnType<typeof setImmediate> | undefined;
+
 	function stop() {
 		watcher?.close();
 		watcher = undefined;
 		if (timer) clearInterval(timer);
 		timer = undefined;
+		if (pendingScan !== undefined) {
+			clearImmediate(pendingScan);
+			pendingScan = undefined;
+		}
 	}
 
 	function deliver(me: string, envelope: Envelope, path: string) {
@@ -260,8 +267,17 @@ export default function mailbox(pi: ExtensionAPI) {
 		}
 		address = id;
 		ensureBoxes(id);
-		scan();
 		updateStatus();
+		// Mail already waiting is claimed on the next event-loop turn, after
+		// every extension's `session_start` handler has run (the runner awaits
+		// each in load order), so a listener that rebuilds its state there sees
+		// it whatever the load order. The watcher and poll timer keep delivering
+		// later mail. A microtask would still run before the next handler.
+		pendingScan = setImmediate(() => {
+			pendingScan = undefined;
+			scan();
+		});
+		pendingScan.unref?.();
 		try {
 			watcher = watch(boxPath(id, "new"), () => scan());
 			watcher.on("error", () => {});

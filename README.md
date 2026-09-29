@@ -120,6 +120,12 @@ assert.equal(probe.error, undefined);
 `mailbox` emits this for every claimed envelope before injecting it, requests
 and replies alike.
 
+`mailbox` never emits it from inside a `session_start` handler. Mail waiting
+when a session starts is claimed on a later event-loop turn, after every
+extension's `session_start` has run, so a listener that rebuilds its state
+synchronously in its own `session_start` sees that mail whatever the load
+order. The watcher and the poll timer deliver later mail as usual.
+
 | Field | Meaning |
 | --- | --- |
 | `envelope` | the claimed envelope, with `from`, `in_reply_to`, `status`, `body` and the rest |
