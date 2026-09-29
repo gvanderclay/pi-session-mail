@@ -89,15 +89,24 @@ function session(sessionId: string, opts: { hasUI?: boolean } = {}) {
 		mailbox: (args: string) => commands.mailbox(args, ctx),
 		start: (reason = "startup") => fire("session_start", { reason }),
 		shutdown: () => fire("session_shutdown"),
-		/** One agent run ending with `text` as the last assistant message, then settling. */
-		answer: async (text?: string) => {
-			const messages = [{ role: "user", content: [{ type: "text", text: "q" }] }];
-			if (text !== undefined) messages.push({ role: "assistant", content: [{ type: "text", text }] });
+		/** One agent run ending with `text` as the last assistant message, then settling; `aborted` marks a run the user stopped. */
+		answer: async (text?: string, opts: { aborted?: boolean } = {}) => {
+			const messages: { role: string; content: unknown; stopReason?: string }[] = [
+				{ role: "user", content: [{ type: "text", text: "q" }] },
+			];
+			if (text !== undefined || opts.aborted)
+				messages.push({
+					role: "assistant",
+					content: text === undefined ? [] : [{ type: "text", text }],
+					stopReason: opts.aborted ? "aborted" : "stop",
+				});
 			await fire("agent_end", { messages });
 			await fire("agent_settled");
 		},
-		agentEnd: (text: string) =>
-			fire("agent_end", { messages: [{ role: "assistant", content: [{ type: "text", text }] }] }),
+		agentEnd: (text: string, opts: { aborted?: boolean } = {}) =>
+			fire("agent_end", {
+				messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: opts.aborted ? "aborted" : "stop" }],
+			}),
 		settle: () => fire("agent_settled"),
 	};
 }
@@ -426,6 +435,133 @@ test("a failed reply is injected with a header saying the request failed", async
 });
 
 // ---------------------------------------------------------------------------
+// Stopped runs, quoted requests, quiet replies (delegate ticket 02)
+
+test("a run the user stopped replies stopped, noting the stop and the partial text", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.mailbox(`${b.id} do the thing`);
+	const [request] = envelopes(a.id, "sent");
+	await b.start();
+	await b.answer("half of the answer", { aborted: true });
+	const [reply] = envelopes(a.id, "new");
+	assert.equal(reply.status, "stopped");
+	assert.deepEqual(reply.in_reply_to, [request.id]);
+	assert.match(reply.body, /^\(The user stopped this run/);
+	assert.ok(reply.body.includes("half of the answer"), reply.body);
+	await a.start();
+	await a.shutdown();
+	await b.shutdown();
+	assert.equal(a.sent.length, 1);
+	assert.match(a.sent[0].message.content, /"stopped", not "done"/);
+});
+
+test("a stopped run with no partial text still says the user stopped it", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.mailbox(`${b.id} do the thing`);
+	await b.start();
+	await b.answer(undefined, { aborted: true });
+	const [reply] = envelopes(a.id, "new");
+	assert.equal(reply.status, "stopped");
+	assert.match(reply.body, /^\(The user stopped this run/);
+	assert.doesNotMatch(reply.body, /no answer/i);
+});
+
+test("a stopped run's unseen requests still get a failed reply", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.mailbox(`${b.id} read this`);
+	await b.start();
+	await a.mailbox(`${b.id} dropped`);
+	const [readId, droppedId] = envelopes(a.id, "sent").map((e) => e.id);
+	b.drop(true);
+	await until(() => b.sent.length === 2, "B to receive the second request");
+	await b.answer("partial", { aborted: true });
+	await b.shutdown();
+	const replies = envelopes(a.id, "new");
+	const stopped = replies.find((r) => r.status === "stopped");
+	const failed = replies.find((r) => r.status === "failed");
+	assert.deepEqual(stopped?.in_reply_to, [readId]);
+	assert.deepEqual(failed?.in_reply_to, [droppedId]);
+});
+
+test("an injected reply quotes every request it answers with its sent/ copy's path", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.mailbox(`${b.id} first request`);
+	await a.mailbox(`${b.id} second request`);
+	const ids = envelopes(a.id, "sent").map((e) => e.id);
+	const copies = files(a.id, "sent");
+	await b.start();
+	await b.answer("both answered");
+	await a.start();
+	await a.shutdown();
+	await b.shutdown();
+	assert.equal(a.sent.length, 1);
+	const text = a.sent[0].message.content;
+	assert.ok(text.includes("> first request"), text);
+	assert.ok(text.includes("> second request"), text);
+	assert.ok(text.includes(join(box(a.id, "sent"), copies[0])), text);
+	assert.ok(text.includes(join(box(a.id, "sent"), copies[1])), text);
+	assert.ok(text.includes(ids[0]) && text.includes(ids[1]), text);
+	assert.match(text, /both answered$/);
+});
+
+test("a request over 2 KiB is quoted cut on a character boundary, naming its copy", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	const long = `${"x".repeat(2 * 1024 - 1)}é${"y".repeat(500)}`;
+	await a.mailbox(`${b.id} ${long}`);
+	const [copy] = files(a.id, "sent");
+	await b.start();
+	await b.answer("short");
+	await a.start();
+	await a.shutdown();
+	await b.shutdown();
+	const text = a.sent[0].message.content;
+	// the two-byte é straddles the 2 KiB mark, so the cut backs off to before it
+	assert.ok(text.includes(`> ${"x".repeat(2 * 1024 - 1)}\n`), text.slice(0, 200));
+	assert.ok(!text.includes("xé"), text);
+	assert.match(text, /Request cut at 2 KiB/);
+	assert.ok(text.includes(join(box(a.id, "sent"), copy)), text);
+	assert.match(text, /short$/);
+});
+
+test("a reply to a request with no sent/ copy names the id and still delivers", async () => {
+	const b = session(newId("b"));
+	mkdirSync(box(b.id, "new"), { recursive: true });
+	const reply = {
+		id: "22222222-2222-4222-8222-222222222222",
+		from: "someone",
+		to: b.id,
+		in_reply_to: ["ghost-request"],
+		status: "done",
+		ts: new Date().toISOString(),
+		body: "the answer",
+	};
+	writeFileSync(join(box(b.id, "new"), "000000000000001-ghost.json"), JSON.stringify(reply));
+	await b.start();
+	await b.shutdown();
+	assert.equal(b.sent.length, 1);
+	assert.match(b.sent[0].message.content, /ghost-request has no copy in sent\//);
+	assert.match(b.sent[0].message.content, /the answer$/);
+});
+
+test("an injected reply does not trigger a turn; an injected request still does", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.mailbox(`${b.id} question`);
+	await b.start();
+	await b.answer("answer");
+	await a.start();
+	await a.shutdown();
+	await b.shutdown();
+	assert.deepEqual(b.sent[0].options, { triggerTurn: true, deliverAs: "followUp" });
+	assert.deepEqual(a.sent[0].options, { deliverAs: "followUp" });
+});
+
+// ---------------------------------------------------------------------------
 // pi.events interface (ticket 04)
 
 type SendPayload = { to: unknown; body: unknown; envelope?: { id: string; to: string; from: string }; error?: string };
@@ -478,14 +614,21 @@ test("without a provider installed, a message:send payload comes back with neith
 });
 
 test("message:inbound sees every delivered envelope, replies with their in_reply_to, and its cur/ path", async () => {
+	type Inbound = {
+		envelope: { in_reply_to: string[] };
+		path: string;
+		requests: { envelope: { id: string; body: string }; path: string }[];
+		handled: boolean;
+	};
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	const seenByA: { envelope: { in_reply_to: string[] }; path: string; handled: boolean }[] = [];
-	const seenByB: typeof seenByA = [];
-	a.events.on("message:inbound", (p) => void seenByA.push(p as never));
-	b.events.on("message:inbound", (p) => void seenByB.push(p as never));
+	const seenByA: Inbound[] = [];
+	const seenByB: Inbound[] = [];
+	a.events.on("message:inbound", (p) => void seenByA.push(p as Inbound));
+	b.events.on("message:inbound", (p) => void seenByB.push(p as Inbound));
 	await a.mailbox(`${b.id} ping`);
 	const [request] = envelopes(a.id, "sent");
+	const [requestCopy] = files(a.id, "sent");
 	await b.start();
 	await b.answer("pong");
 	await a.start();
@@ -493,11 +636,16 @@ test("message:inbound sees every delivered envelope, replies with their in_reply
 	await b.shutdown();
 	assert.equal(seenByB.length, 1);
 	assert.deepEqual(seenByB[0].envelope.in_reply_to, []);
+	assert.deepEqual(seenByB[0].requests, []);
 	assert.equal(seenByB[0].handled, false);
 	assert.ok(existsSync(seenByB[0].path));
 	assert.ok(seenByB[0].path.startsWith(box(b.id, "cur")));
 	assert.equal(seenByA.length, 1);
 	assert.deepEqual(seenByA[0].envelope.in_reply_to, [request.id]);
+	assert.equal(seenByA[0].requests.length, 1);
+	assert.equal(seenByA[0].requests[0].envelope.id, request.id);
+	assert.equal(seenByA[0].requests[0].envelope.body, "ping");
+	assert.equal(seenByA[0].requests[0].path, join(box(a.id, "sent"), requestCopy));
 	assert.equal(a.sent.length, 1);
 });
 

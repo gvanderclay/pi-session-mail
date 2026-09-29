@@ -9,9 +9,15 @@ session's address, and `/mailbox <address> <text>` sends a request. Mail waits
 on disk until a session with that address starts or resumes; a running session
 claims it into `cur/` and injects it once as a follow-up labelled as coming
 from another Pi session, with the body cut at 32 KiB plus the envelope's path.
-When the recipient's agent settles, its last answer goes back to each sender
-as one `done` reply listing the requests it answers, and a request the session
-was stopped before reading gets a `failed` reply instead. Replies are never
+A request starts a turn when the session is idle; a reply does not, so it is
+shown in an idle session and the agent sees it with the next message. A reply
+also quotes each request it answers, capped at 2 KiB each with the `sent/`
+copy's path, or the request's id alone when this session has no copy.
+
+When the recipient's agent settles, its last answer goes back to each sender as
+one reply listing the requests it answers: `done` normally, or `stopped` when
+the user stopped the run, with the partial text. A request the session was
+stopped before reading gets a `failed` reply instead. Replies are never
 answered. The footer shows `✉ N pending · N read · N awaiting`, non-zero
 counts only.
 
@@ -46,6 +52,17 @@ in the npm tarball.
 
 None. `mailbox` reads no settings file and no environment variable of its
 own, and it names no model.
+
+## Statuses
+
+A reply's `status` says what the run did. Requests carry no status.
+
+| `status` | Meaning |
+| --- | --- |
+| `done` | the run settled; the body is its answer |
+| `stopped` | the user stopped the run before it settled; the body says so, then the partial text |
+| `failed` | the session was stopped before it read the request; nothing was done |
+| `needs-input` | the run is waiting on the user; reserved, and nothing in `mailbox` sends it yet |
 
 ## Hooks
 
@@ -107,23 +124,30 @@ and replies alike.
 | --- | --- |
 | `envelope` | the claimed envelope, with `from`, `in_reply_to`, `status`, `body` and the rest |
 | `path` | the envelope's path in this session's `cur/` |
+| `requests` | a reply's `in_reply_to` requests found in this session's `sent/`, each as `{ envelope, path }`; empty for a request, and shorter than `in_reply_to` when a copy is missing |
 | `handled` | set to `true` by a listener that shows the message itself; `mailbox` then injects nothing |
 
 A listener that sets `handled` owns the display, and chooses whether its own
 message starts a turn (`triggerTurn`). A request a listener handled still
 arms this session's reply and counts as read, so a takeover never leaves a
-sender without an answer.
+sender without an answer. A reply `mailbox` injects itself quotes each request
+the same way, capped at 2 KiB with the copy's path.
 
 ```js message:inbound
 // Take over replies to requests this extension sent; `mailbox` still shows
 // requests and any mail the listener ignores.
 pi.events.on("message:inbound", (payload) => {
   if (payload.handled) return;
-  const { envelope, path } = payload;
+  const { envelope, path, requests } = payload;
   if (envelope.in_reply_to.length === 0) return;
   payload.handled = true;
+  const asked = requests.map(({ envelope: request, path: copy }) => `${request.body} (copy at ${copy})`);
   pi.sendMessage(
-    { customType: "my-extension", content: `Reply from ${envelope.from} (${path}): ${envelope.body}`, display: true },
+    {
+      customType: "my-extension",
+      content: `Reply from ${envelope.from} to ${asked.join("; ")}:\n${envelope.body}\n(claimed at ${path})`,
+      display: true,
+    },
     { triggerTurn: true, deliverAs: "followUp" },
   );
 });

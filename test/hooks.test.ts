@@ -139,7 +139,7 @@ test("the README's no-provider example leaves a payload with neither field set",
 	}
 });
 
-test("the README's message:inbound example takes over a reply and leaves a request to mailbox", async () => {
+test("the README's message:inbound example takes over a reply, quoting its requests, and leaves a request to mailbox", async () => {
 	const s = session(newId("s"));
 	const r = session(newId("r"));
 	const p = session(newId("p"));
@@ -147,6 +147,13 @@ test("the README's message:inbound example takes over a reply and leaves a reque
 	await r.start();
 	await p.start();
 	try {
+		const payloads: {
+			envelope: { in_reply_to: string[] };
+			path: string;
+			requests: { envelope: { id: string; body: string }; path: string }[];
+			handled: boolean;
+		}[] = [];
+		s.events.on("message:inbound", (payload) => void payloads.push(payload as never));
 		await runExample("message:inbound", { pi: s.pi, peer: p.id, bareBus: createEventBus() });
 
 		// A request is not a reply, so the example leaves it to `mailbox`.
@@ -154,9 +161,12 @@ test("the README's message:inbound example takes over a reply and leaves a reque
 		await until(() => s.sent.length === 1, "the request to be injected");
 		assert.equal(s.sent[0].message.customType, "mailbox");
 		assert.match(s.sent[0].message.content, /a request$/);
+		assert.deepEqual(payloads[0].requests, []);
 
 		// A reply to a request `s` sent is the example's: it injects its own message.
 		s.events.emit("message:send", { to: r.id, body: "please answer" });
+		const [request] = envelopes(s.id, "sent");
+		const [requestCopy] = files(s.id, "sent");
 		await until(() => r.sent.length === 1, "r to receive the request");
 		await r.answer("the answer");
 		await until(() => s.sent.length === 2, "the reply to be injected");
@@ -166,9 +176,17 @@ test("the README's message:inbound example takes over a reply and leaves a reque
 		);
 		const reply = s.sent[1];
 		assert.match(reply.message.content, new RegExp(`Reply from ${r.id}`));
-		assert.ok(reply.message.content.includes(join(root, s.id, "cur")), "the example quotes the envelope's path");
-		assert.match(reply.message.content, /the answer$/);
+		assert.ok(reply.message.content.includes("please answer"), "the example quotes the request's body");
+		assert.ok(
+			reply.message.content.includes(join(root, s.id, "sent", requestCopy)),
+			"the example quotes the copy's path",
+		);
+		assert.ok(reply.message.content.includes(join(root, s.id, "cur")), "the example quotes the claimed envelope");
+		assert.match(reply.message.content, /the answer/);
 		assert.deepEqual(reply.options, { triggerTurn: true, deliverAs: "followUp" });
+		assert.equal(payloads[1].requests.length, 1);
+		assert.equal(payloads[1].requests[0].envelope.id, request.id);
+		assert.equal(payloads[1].requests[0].path, join(root, s.id, "sent", requestCopy));
 	} finally {
 		await s.shutdown();
 		await r.shutdown();

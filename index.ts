@@ -3,11 +3,14 @@
 // Every session has an address (its session id) and an inbox under
 // `<agent dir>/mailbox/<address>/`. `/mailbox` shows the address and
 // `/mailbox <address> <text>` sends a request. Mail in the inbox is claimed
-// into `cur/` and injected as a follow-up that names the sending session.
-// When the recipient settles, its last answer goes back to each sender as one
-// `done` reply; requests that never entered the conversation (an abort drops
-// queued follow-ups) get a `failed` reply instead. Replies are never answered.
-// Other extensions use `pi.events` (below).
+// into `cur/` and injected as a follow-up that names the sending session; a
+// reply quotes each request it answers from this session's `sent/` copy and,
+// unlike a request, does not start a turn. When the recipient settles, its
+// last answer goes back to each sender as one reply — `done` normally, or
+// `stopped` when the user stopped the run, with any partial text. Requests
+// that never entered the conversation (an abort drops queued follow-ups) get
+// a `failed` reply instead. Replies are never answered. Other extensions use
+// `pi.events` (below).
 //
 // Specs: .scratch/pi-mailbox/spec.md (the mailbox itself) and
 // .scratch/pi-delegate/spec.md (the `message:*` hooks and this package's
@@ -16,7 +19,19 @@ import { type FSWatcher, watch } from "node:fs";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import { boxPath, claim, diskCounts, type Envelope, ensureBoxes, isAddress, listNew, readEnvelope, send } from "./store.ts";
+import {
+	boxPath,
+	claim,
+	diskCounts,
+	type Envelope,
+	ensureBoxes,
+	findSent,
+	isAddress,
+	listNew,
+	readEnvelope,
+	send,
+	type SentCopy,
+} from "./store.ts";
 
 const CUSTOM_TYPE = "mailbox";
 const STATUS_KEY = "mailbox";
@@ -24,29 +39,66 @@ const STATUS_KEY = "mailbox";
 const POLL_MS = 1000;
 /** Inbound bodies are cut at this many UTF-8 bytes. */
 const BODY_CAP = 32 * 1024;
+/** Each request quoted in a reply is cut at this many UTF-8 bytes. */
+const QUOTE_CAP = 2 * 1024;
 /** Reply body when the run ended with no assistant text. */
 const NO_ANSWER = "(The session settled with no answer text.)";
+/** Reply body of a run the user stopped, with any partial answer text after it. */
+const STOPPED = "(The user stopped this run before it finished; the text that follows, if any, is partial.)";
 /** Body of a `failed` reply to requests that never entered the conversation. */
 const UNSEEN = "(The session was stopped before it read the message. Nothing was done; send it again if it is still needed.)";
 
-/** Cut `body` to at most BODY_CAP bytes on a character boundary; undefined when it fits. */
-function cap(body: string): string | undefined {
-	const bytes = Buffer.from(body, "utf8");
-	if (bytes.length <= BODY_CAP) return undefined;
-	let end = BODY_CAP;
+/** Cut `text` to at most `max` UTF-8 bytes on a character boundary; undefined when it already fits. */
+function cap(text: string, max: number): string | undefined {
+	const bytes = Buffer.from(text, "utf8");
+	if (bytes.length <= max) return undefined;
+	let end = max;
 	while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--; // back off a split character
 	return bytes.subarray(0, end).toString("utf8");
 }
 
-function inboundText(envelope: Envelope, path: string): string {
+/** A reply quotes each request it answers: the id, the copy's path, then the capped body. */
+function quoteRequest(request: SentCopy): string {
+	const cut = cap(request.envelope.body, QUOTE_CAP);
+	const body =
+		cut === undefined
+			? request.envelope.body
+			: `${cut}\n[mailbox] Request cut at 2 KiB; the full copy is ${request.path}`;
+	return `[mailbox] Your request ${request.envelope.id}, quoted from ${request.path}:\n${body
+		.split("\n")
+		.map((line) => `> ${line}`)
+		.join("\n")}`;
+}
+
+/**
+ * The request copies this session holds for `ids`, and one quoted block per id
+ * in order; an id with no copy is named by id alone.
+ */
+function requestQuotes(me: string, ids: readonly string[]): { requests: SentCopy[]; quotes: string[] } {
+	const requests: SentCopy[] = [];
+	const quotes: string[] = [];
+	for (const id of ids) {
+		const copy = findSent(me, id);
+		if (copy === undefined) {
+			quotes.push(`[mailbox] Your request ${id} has no copy in sent/; only its id is known.`);
+			continue;
+		}
+		requests.push(copy);
+		quotes.push(quoteRequest(copy));
+	}
+	return { requests, quotes };
+}
+
+/** The injected message: who it is from, the requests it answers, then its capped body. */
+function inboundText(envelope: Envelope, path: string, quotes: readonly string[]): string {
 	const header = [`[mailbox] Message from another Pi session at ${envelope.from}, not from the user.`];
 	if (envelope.in_reply_to.length > 0)
 		header.push(`It is a reply to your request${envelope.in_reply_to.length > 1 ? "s" : ""} ${envelope.in_reply_to.join(", ")}.`);
 	if (envelope.in_reply_to.length > 0 && envelope.status !== "done")
 		header.push(`Its status is "${envelope.status}", not "done": it is not an answer.`);
-	const cut = cap(envelope.body);
+	const cut = cap(envelope.body, BODY_CAP);
 	const body = cut === undefined ? envelope.body : `${cut}\n\n[mailbox] Body cut at 32 KiB; the full envelope is ${path}`;
-	return `${header.join(" ")}\n\n${body}`;
+	return [header.join(" "), ...quotes, body].join("\n\n");
 }
 
 /**
@@ -57,34 +109,40 @@ function inboundText(envelope: Envelope, path: string): string {
  *   request and sets `envelope` (or `error`) on the same object. Neither set
  *   means no provider is installed.
  * - `message:inbound`: emitted for every claimed envelope, requests and
- *   replies alike, before injection; a listener sets `handled` to show it
- *   itself.
+ *   replies alike, before injection; `requests` holds a reply's request
+ *   copies from this session's `sent/`, and a listener sets `handled` to show
+ *   the message itself.
  */
 const SEND = "message:send";
 const INBOUND = "message:inbound";
 
 type SendPayload = { to: unknown; body: unknown; envelope?: Envelope; error?: string };
-type InboundPayload = { envelope: Envelope; path: string; handled: boolean };
+type InboundPayload = { envelope: Envelope; path: string; requests: SentCopy[]; handled: boolean };
 
-type Message = { role?: string; content?: unknown };
+type Message = { role?: string; content?: unknown; stopReason?: unknown };
 
-function lastAssistantText(messages: readonly unknown[]): string | undefined {
+/** The last assistant message in a run's transcript, if any. */
+function lastAssistant(messages: readonly unknown[]): Message | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i] as Message;
-		if (message?.role !== "assistant") continue;
-		const content = message.content;
-		const text =
-			typeof content === "string"
-				? content
-				: Array.isArray(content)
-					? content
-							.filter((part): part is { type: "text"; text: string } => part?.type === "text" && typeof part.text === "string")
-							.map((part) => part.text)
-							.join("\n")
-					: "";
-		return text.trim() === "" ? undefined : text;
+		if (message?.role === "assistant") return message;
 	}
 	return undefined;
+}
+
+/** The text of an assistant message; undefined when it has none. */
+function assistantText(message: Message): string | undefined {
+	const content = message.content;
+	const text =
+		typeof content === "string"
+			? content
+			: Array.isArray(content)
+				? content
+						.filter((part): part is { type: "text"; text: string } => part?.type === "text" && typeof part.text === "string")
+						.map((part) => part.text)
+						.join("\n")
+				: "";
+	return text.trim() === "" ? undefined : text;
 }
 
 export default function mailbox(pi: ExtensionAPI) {
@@ -100,6 +158,8 @@ export default function mailbox(pi: ExtensionAPI) {
 	let seen = new Set<string>();
 	/** Text of the last assistant message, remembered at `agent_end`. */
 	let lastAnswer: string | undefined;
+	/** Whether that message's run was aborted (`stopReason: "aborted"`). */
+	let lastAborted = false;
 	/** Messages injected since the last settle, for the status's pending count. */
 	let injected = 0;
 
@@ -126,10 +186,11 @@ export default function mailbox(pi: ExtensionAPI) {
 		timer = undefined;
 	}
 
-	function deliver(envelope: Envelope, path: string) {
+	function deliver(me: string, envelope: Envelope, path: string) {
 		delivered.add(envelope.id);
+		const { requests, quotes } = requestQuotes(me, envelope.in_reply_to);
 		// Listeners run synchronously inside emit, so `handled` is final when it returns.
-		const inbound: InboundPayload = { envelope, path, handled: false };
+		const inbound: InboundPayload = { envelope, path, requests, handled: false };
 		pi.events.emit(INBOUND, inbound);
 		// Only requests arm a reply, so replies are never answered. A request
 		// arms one even when a listener took over its display.
@@ -141,8 +202,9 @@ export default function mailbox(pi: ExtensionAPI) {
 		}
 		injected++;
 		pi.sendMessage(
-			{ customType: CUSTOM_TYPE, content: inboundText(envelope, path), display: true, details: { id: envelope.id } },
-			{ triggerTurn: true, deliverAs: "followUp" },
+			{ customType: CUSTOM_TYPE, content: inboundText(envelope, path, quotes), display: true, details: { id: envelope.id } },
+			// A request starts a turn; a reply only shows itself to an idle session.
+			envelope.in_reply_to.length === 0 ? { triggerTurn: true, deliverAs: "followUp" } : { deliverAs: "followUp" },
 		);
 	}
 
@@ -162,7 +224,7 @@ export default function mailbox(pi: ExtensionAPI) {
 				continue;
 			}
 			if (delivered.has(envelope.id)) continue;
-			deliver(envelope, path);
+			deliver(me, envelope, path);
 		}
 		if (names.length > 0) updateStatus();
 	}
@@ -188,6 +250,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		owed = new Map();
 		seen = new Set();
 		lastAnswer = undefined;
+		lastAborted = false;
 		injected = 0;
 		const id = context.sessionManager.getSessionId();
 		if (!isAddress(id)) {
@@ -219,26 +282,35 @@ export default function mailbox(pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", async (event) => {
-		lastAnswer = lastAssistantText(event.messages);
+		const last = lastAssistant(event.messages);
+		lastAnswer = last === undefined ? undefined : assistantText(last);
+		lastAborted = last?.stopReason === "aborted";
 	});
 
 	// Reply only once Pi will not continue on its own: a retry, compaction or
 	// queued follow-up after `agent_end` would otherwise get a premature answer.
 	pi.on("agent_settled", async () => {
 		const me = address;
-		const body = lastAnswer ?? NO_ANSWER;
+		// A stopped run answers `stopped`, notes the stop, then gives what it had.
+		const body = lastAborted
+			? lastAnswer === undefined
+				? STOPPED
+				: `${STOPPED}\n\n${lastAnswer}`
+			: (lastAnswer ?? NO_ANSWER);
+		const status = lastAborted ? "stopped" : "done";
 		const replies = owed;
 		const read = seen;
 		owed = new Map();
 		seen = new Set();
 		lastAnswer = undefined;
+		lastAborted = false;
 		injected = 0;
 		if (me === undefined) return;
 		for (const [to, ids] of replies) {
 			const done = ids.filter((id) => read.has(id));
 			const failed = ids.filter((id) => !read.has(id));
 			try {
-				if (done.length > 0) send(me, to, body, done);
+				if (done.length > 0) send(me, to, body, done, status);
 				if (failed.length > 0) send(me, to, UNSEEN, failed, "failed");
 			} catch (err) {
 				warn(`could not reply to ${to}: ${(err as Error).message}`);

@@ -113,6 +113,9 @@ export function claim(address: string, name: string): string | null {
 	}
 }
 
+/** A request's copy in its sender's `sent/`, with its path. */
+export type SentCopy = { envelope: Envelope; path: string };
+
 /** Parse an envelope file; throws when it is not a well-formed envelope from a valid address. */
 export function readEnvelope(path: string): Envelope {
 	const value = JSON.parse(readFileSync(path, "utf8")) as Partial<Envelope>;
@@ -123,6 +126,31 @@ export function readEnvelope(path: string): Envelope {
 		throw new Error("in_reply_to is not a list of ids");
 	if (typeof value.body !== "string") throw new Error("missing body");
 	return value as Envelope;
+}
+
+/**
+ * Find this session's `sent/` copy of the request with envelope id `id`;
+ * undefined when no readable copy exists. Called while claiming a reply, so a
+ * reply can quote the request it answers without another package's files.
+ */
+export function findSent(address: string, id: string): SentCopy | undefined {
+	const dir = boxPath(address, "sent");
+	let names: string[];
+	try {
+		names = readdirSync(dir).filter((name) => name.endsWith(".json"));
+	} catch {
+		return undefined;
+	}
+	for (const name of names) {
+		const path = join(dir, name);
+		try {
+			const envelope = readEnvelope(path);
+			if (envelope.id === id) return { envelope, path };
+		} catch {
+			// an unreadable copy is no copy
+		}
+	}
+	return undefined;
 }
 
 function envelopesIn(address: string, box: Box): Partial<Envelope>[] {
