@@ -8,14 +8,15 @@
 // busy state in `<mail root>/running/<address>.json` (`running.ts`), which
 // `session_mail_list` reports (`tools.ts`) and which lets a `to` name a
 // session by its Pi session name or short id. `/mailbox` shows the address and
-// name, and `/mailbox <to> <text>` sends a request. Mail in the inbox is
-// claimed into `cur/` and injected as a follow-up that names the sending
-// session; a reply quotes each request it answers from this session's `sent/`
-// copy and, unlike a request, does not start a turn. When the recipient settles, its
+// name, and `/mailbox <to> <text>` sends a request; `session_mail_send` sends
+// a message, which expects no answer. Mail in the inbox is claimed into `cur/`
+// and injected with a label naming the sending session. Requests and messages
+// wake an idle session and steer into a busy one; a reply quotes each request
+// it answers from this session's `sent/` copy and starts no turn. When the recipient settles, its
 // last answer goes back to each sender as one reply — `done` normally, or
 // `stopped` when the user stopped the run, with any partial text. Requests
 // that never entered the conversation (an abort drops queued follow-ups) get
-// a `failed` reply instead. Replies are never answered. Other extensions use
+// a `failed` reply instead. Replies and messages are never answered. Other extensions use
 // `pi.events` (below).
 //
 // Specs: .scratch/pi-mailbox/spec.md (the mailbox itself),
@@ -39,7 +40,7 @@ import {
 	send,
 	type SentCopy,
 } from "./store.ts";
-import { label, removeRecord, resolveTo, type State, writeRecord } from "./running.ts";
+import { label, listRunning, removeRecord, resolveTo, type State, writeRecord } from "./running.ts";
 import { registerTools } from "./tools.ts";
 
 const CUSTOM_TYPE = "mailbox";
@@ -98,9 +99,20 @@ function requestQuotes(me: string, ids: readonly string[]): { requests: SentCopy
 	return { requests, quotes };
 }
 
-/** The injected message: who it is from, the requests it answers, then its capped body. */
+/** The sender as a label names it: its session name, or its short id when it has none or is not running. */
+function senderLabel(address: string): string {
+	return label(listRunning().find((record) => record.address === address) ?? { address });
+}
+
+/** The injected message: who it is from, what kind it is, the requests it answers, then its capped body. */
 function inboundText(envelope: Envelope, path: string, quotes: readonly string[]): string {
-	const header = [`[mailbox] Message from another Pi session at ${envelope.from}, not from the user.`];
+	const header = [
+		`[mailbox] Message from another Pi session at ${envelope.from} (${senderLabel(envelope.from)}), not from the user.`,
+	];
+	if (envelope.kind === "message")
+		header.push(
+			"It expects no answer; if you want to answer anyway, send one with session_mail_send to that address.",
+		);
 	if (envelope.in_reply_to.length > 0)
 		header.push(`It is a reply to your request${envelope.in_reply_to.length > 1 ? "s" : ""} ${envelope.in_reply_to.join(", ")}.`);
 	if (envelope.in_reply_to.length > 0 && envelope.status !== "done")
@@ -230,9 +242,9 @@ export default function mailbox(pi: ExtensionAPI) {
 		// Listeners run synchronously inside emit, so `handled` is final when it returns.
 		const inbound: InboundPayload = { envelope, path, requests, handled: false };
 		pi.events.emit(INBOUND, inbound);
-		// Only requests arm a reply, so replies are never answered. A request
-		// arms one even when a listener took over its display.
-		if (envelope.in_reply_to.length === 0) owed.set(envelope.from, [...(owed.get(envelope.from) ?? []), envelope.id]);
+		// Only requests arm an answer: replies are never answered, and messages
+		// expect none. A request arms one even when a listener took over its display.
+		if (envelope.kind === "request") owed.set(envelope.from, [...(owed.get(envelope.from) ?? []), envelope.id]);
 		// `mailbox` cannot observe a listener's own message, so a takeover counts as seen.
 		if (inbound.handled) {
 			seen.add(envelope.id);
@@ -241,8 +253,10 @@ export default function mailbox(pi: ExtensionAPI) {
 		injected++;
 		pi.sendMessage(
 			{ customType: CUSTOM_TYPE, content: inboundText(envelope, path, quotes), display: true, details: { id: envelope.id } },
-			// A request starts a turn; a reply only shows itself to an idle session.
-			envelope.in_reply_to.length === 0 ? { triggerTurn: true, deliverAs: "followUp" } : { deliverAs: "followUp" },
+			// Mail for the model wakes an idle session and steers into a busy one at
+			// its next gap between tool calls, queued user input or not; a reply only
+			// shows itself, and starts no turn.
+			envelope.kind === "reply" ? { deliverAs: "followUp" } : { triggerTurn: true, deliverAs: "steer" },
 		);
 	}
 
@@ -396,7 +410,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		address = undefined;
 	});
 
-	registerTools(pi);
+	registerTools(pi, { sent: () => updateStatus() });
 
 	pi.registerCommand("mailbox", {
 		description: "Show this session's mailbox address and name, or send a request: /mailbox <name or id> <text>",

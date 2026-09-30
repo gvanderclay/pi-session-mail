@@ -92,7 +92,7 @@ test("two sessions sharing a mail root list each other, marking the caller, and 
 	const b = session(newId(), { cwd: "/work/b" });
 	await a.start();
 	await b.start();
-	assert.deepEqual(a.tools(), ["session_mail_list"]);
+	assert.deepEqual(a.tools(), ["session_mail_list", "session_mail_send"]);
 
 	const fromA = (await a.toolCall("session_mail_list")).content[0].text;
 	assert.match(fromA, /^2 running sessions:/);
@@ -267,4 +267,92 @@ test("/mailbox with no arguments shows the address and the name, or the short id
 	const b = session(newId());
 	await b.mailbox("");
 	assert.equal(b.notes.at(-1), `Mailbox address: ${b.id}\nName: none; other sessions see ${b.id.slice(0, 8)} (set one with /name)`);
+});
+
+// ---------------------------------------------------------------------------
+// session_mail_send and delivery
+
+test("a message to an idle session starts a turn by steering, labelled with the sender's name, id and no-answer note", async () => {
+	const a = session(newId(), { name: "alpha" });
+	const b = session(newId(), { name: "bravo" });
+	await a.start();
+	await b.start();
+	const result = await a.toolCall("session_mail_send", { to: "bravo", message: "  heads up  " });
+	const [message] = envelopes(a.id, "sent");
+	assert.equal(message.kind, "message");
+	assert.equal(message.hops, 0);
+	assert.equal(message.to, b.id);
+	assert.equal(message.body, "heads up");
+	assert.equal(result.content[0].text, `Sent message ${message.id} to bravo (${b.id}). It expects no answer; any answer arrives as a message.`);
+	assert.deepEqual(result.details, { id: message.id, to: b.id, running: true });
+
+	await until(() => b.sent.length === 1, "the message to be injected");
+	assert.deepEqual(b.sent[0].options, { triggerTurn: true, deliverAs: "steer" });
+	const content = b.sent[0].message.content;
+	assert.ok(content.startsWith(`[mailbox] Message from another Pi session at ${a.id} (alpha), not from the user.`), content);
+	assert.match(content, /expects no answer; if you want to answer anyway, send one with session_mail_send/);
+	assert.match(content, /heads up$/);
+	await a.shutdown();
+	await b.shutdown();
+});
+
+test("a message to a busy session is steered in, not queued as a follow-up", async () => {
+	const a = session(newId());
+	const b = session(newId());
+	await a.start();
+	await b.start();
+	await b.agentStart();
+	await a.toolCall("session_mail_send", { to: b.id, message: "change course" });
+	await until(() => b.sent.length === 1, "the message to be injected");
+	assert.deepEqual(b.sent[0].options, { triggerTurn: true, deliverAs: "steer" });
+	assert.ok(b.sent[0].message.content.includes(`(${a.id.slice(0, 8)})`), "an unnamed sender shows its short id");
+	await a.shutdown();
+	await b.shutdown();
+});
+
+test("a message gets no answer at settle while a request in the same run still does, and never counts as awaiting", async () => {
+	const a = session(newId());
+	const b = session(newId());
+	await a.start();
+	await b.start();
+	await a.toolCall("session_mail_send", { to: b.id, message: "fyi" });
+	await a.mailbox(`${b.id} a question`);
+	await until(() => b.sent.length === 2, "both to be injected");
+	assert.equal(a.status(), "✉ 1 awaiting");
+	await b.answer("the answer");
+	const answers = envelopes(a.id, "new").concat(envelopes(a.id, "cur"));
+	assert.equal(answers.length, 1);
+	const request = envelopes(a.id, "sent").find((e) => e.kind === "request");
+	assert.deepEqual(answers[0].in_reply_to, [request.id]);
+	assert.equal(answers[0].body, "the answer");
+	await a.shutdown();
+	await b.shutdown();
+});
+
+test("a message to a closed session's full id waits in its new/, and the result says so", async () => {
+	const a = session(newId());
+	await a.start();
+	const closed = newId();
+	const result = await a.toolCall("session_mail_send", { to: closed, message: "when you are back" });
+	const [waiting] = envelopes(closed, "new");
+	assert.equal(waiting.kind, "message");
+	assert.match(result.content[0].text, new RegExp(`left for ${closed}, which is not running: it waits in that session's inbox`));
+	assert.equal((result.details as { running: boolean }).running, false);
+	await a.shutdown();
+});
+
+test("session_mail_send refuses an empty text, an unknown or ambiguous to, and this session, writing nothing", async () => {
+	const a = session(newId(), { name: "me" });
+	const b = session(newId(), { name: "twin" });
+	const c = session(newId(), { name: "twin" });
+	await a.start();
+	await b.start();
+	await c.start();
+	await assert.rejects(a.toolCall("session_mail_send", { to: b.id, message: "   " }), /empty/);
+	await assert.rejects(a.toolCall("session_mail_send", { to: "nobody", message: "hi" }), /no running session is named "nobody"/);
+	await assert.rejects(a.toolCall("session_mail_send", { to: "twin", message: "hi" }), /matches several running sessions/);
+	await assert.rejects(a.toolCall("session_mail_send", { to: "me", message: "hi" }), /cannot send mail to itself/);
+	assert.deepEqual(files(a.id, "sent"), []);
+	assert.deepEqual(files(b.id, "new"), []);
+	await Promise.all([a.shutdown(), b.shutdown(), c.shutdown()]);
 });

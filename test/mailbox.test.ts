@@ -103,7 +103,7 @@ test("an invalid address is rejected before any path is built", async () => {
 // ---------------------------------------------------------------------------
 // Receiving (ticket 02)
 
-test("a running session claims a message into cur/ and injects it once as a labelled follow-up", async () => {
+test("a running session claims a message into cur/ and injects it once as labelled steered mail that starts a turn", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
 	await a.start();
@@ -112,7 +112,7 @@ test("a running session claims a message into cur/ and injects it once as a labe
 		await a.mailbox(`${b.id} what is 2 + 2?`);
 		await until(() => b.sent.length === 1, "B to receive");
 		const [{ message, options }] = b.sent;
-		assert.deepEqual(options, { triggerTurn: true, deliverAs: "followUp" });
+		assert.deepEqual(options, { triggerTurn: true, deliverAs: "steer" });
 		assert.equal(message.customType, "mailbox");
 		assert.equal(message.display, true);
 		assert.match(message.content, new RegExp(`another Pi session at ${a.id}`));
@@ -579,7 +579,7 @@ test("an injected reply does not trigger a turn; an injected request still does"
 	await a.start();
 	await a.shutdown();
 	await b.shutdown();
-	assert.deepEqual(b.sent[0].options, { triggerTurn: true, deliverAs: "followUp" });
+	assert.deepEqual(b.sent[0].options, { triggerTurn: true, deliverAs: "steer" });
 	assert.deepEqual(a.sent[0].options, { deliverAs: "followUp" });
 });
 

@@ -209,11 +209,14 @@ function envelopesIn(address: string, box: Box): Partial<Envelope>[] {
 
 /**
  * Counts derived from disk: files still in `new/`, envelopes in `cur/`, and
- * requests in `sent/` that no envelope in `cur/` answers.
+ * requests (not messages) in `sent/` that no envelope in `cur/` answers.
  */
 export function diskCounts(address: string): { unclaimed: number; read: number; awaiting: number } {
 	const cur = envelopesIn(address, "cur");
 	const answered = new Set(cur.flatMap((e) => (Array.isArray(e.in_reply_to) ? e.in_reply_to : [])));
-	const awaiting = envelopesIn(address, "sent").filter((e) => typeof e.id === "string" && !answered.has(e.id)).length;
+	// A message expects no answer, so it never counts as awaiting one.
+	const awaiting = envelopesIn(address, "sent").filter(
+		(e) => typeof e.id === "string" && e.kind !== "message" && !answered.has(e.id),
+	).length;
 	return { unclaimed: listNew(address).length, read: cur.length, awaiting };
 }

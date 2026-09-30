@@ -12,19 +12,17 @@ different agent directories reach each other. `/mailbox` shows this session's
 address and name, and `/mailbox <to> <text>` sends a request, with `to`
 resolved as described under [Addressing](#addressing). Mail waits
 on disk until a session with that address starts or resumes; a running session
-claims it into `cur/` and injects it once as a follow-up labelled as coming
-from another Pi session, with the body cut at 32 KiB plus the envelope's path.
-A request starts a turn when the session is idle; a reply does not, so it is
-shown in an idle session and the agent sees it with the next message. A reply
-also quotes each request it answers, capped at 2 KiB each with the `sent/`
-copy's path, or the request's id alone when this session has no copy.
+claims it into `cur/` and injects it once, with the body cut at 32 KiB plus
+the envelope's path (see [Delivery](#delivery)). A reply also quotes each
+request it answers, capped at 2 KiB each with the `sent/` copy's path, or the
+request's id alone when this session has no copy.
 
 When the recipient's agent settles, its last answer goes back to each sender as
 one reply listing the requests it answers: `done` normally, or `stopped` when
 the user stopped the run, with the partial text. A request the session was
-stopped before reading gets a `failed` reply instead. Replies are never
-answered. The footer shows `✉ N pending · N read · N awaiting`, non-zero
-counts only.
+stopped before reading gets a `failed` reply instead. Replies and messages are
+never answered. The footer shows `✉ N pending · N read · N awaiting`, non-zero
+counts only; `awaiting` counts requests with no answer yet, never messages.
 
 ## Running sessions
 
@@ -38,11 +36,12 @@ last changed. The record is rewritten when the session is renamed
 exists counts as not running, and whoever reads it deletes it; so does a
 session left behind by a crash.
 
-The model gets one tool:
+The model gets these tools:
 
 | Tool | Parameters | What it does |
 | --- | --- | --- |
 | `session_mail_list` | none | Lists every running session, in every route: its name (or short id, the first 8 characters of its id, when it has no name), full id, working directory, idle or busy state and whom it is waiting on, and marks the calling session. |
+| `session_mail_send` | `to`, `message` | Writes a message (`kind: "message"`) and returns its id. To a running session it is delivered at once; to a closed session, by full id, it waits in that session's inbox and the result says so. Refused when `to` does not resolve, is ambiguous or is this session, and when the text is empty. |
 
 ## Addressing
 
@@ -59,6 +58,30 @@ A `to`, typed after `/mailbox` or given to a tool, resolves as follows:
 4. A session cannot send mail to itself.
 
 `message:send` does not resolve names: its `to` is an address.
+
+## Delivery
+
+| Kind | Written by | Delivered as | Answered |
+| --- | --- | --- | --- |
+| `request` | `/mailbox <to> <text>`, `message:send` | `triggerTurn`, `deliverAs: "steer"` | yes, when the run settles |
+| `message` | `session_mail_send` | `triggerTurn`, `deliverAs: "steer"` | never |
+| `reply` | the answering session | `deliverAs: "followUp"`, no turn | never |
+
+Mail for the model wakes an idle session, and reaches a busy one at its next
+gap between tool calls rather than after the run. It is never held back while
+the user has input queued. A reply starts no turn: it is shown in an idle
+session and the model sees it with the next message, unless a
+`message:inbound` listener takes it over, as `delegate` does for its tasks.
+
+Every injected message opens with a label saying it comes from another Pi
+session at its full id, followed by its name (or short id), and not from the
+user. A message's label also says it expects no answer and that
+`session_mail_send` is how to answer anyway. A reply's label names the
+requests it answers and, when its status is not `done`, says it is not an
+answer.
+
+Mail counts as read when it enters the conversation (`message_end`). A
+request an abort dropped before that is answered `failed`.
 
 ## Envelopes
 
@@ -179,8 +202,8 @@ assert.equal(probe.error, undefined);
 
 ### `message:inbound`
 
-`mailbox` emits this for every claimed envelope before injecting it, requests
-and replies alike.
+`mailbox` emits this for every claimed envelope before injecting it, requests,
+messages and replies alike.
 
 `mailbox` never emits it from inside a `session_start` handler. Mail waiting
 when a session starts is claimed on a later event-loop turn (`setImmediate`),
