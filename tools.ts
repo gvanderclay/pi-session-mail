@@ -3,8 +3,10 @@
 //
 // `session_mail_list` reports every running Pi session on this machine, in
 // every route, and marks the calling one. `session_mail_send` leaves a plain
-// message, which wakes or steers its recipient and expects no answer. Mail a
-// tool sends carries the turn's hop count and is refused once the count
+// message, which wakes or steers its recipient and expects no answer.
+// `session_mail_ask` leaves an ask and waits, one at a time, for the answer,
+// which comes back as its result rather than as a message. Mail a tool sends
+// carries the turn's hop count and is refused once the count
 // reaches `hopLimit` from `<agent dir>/session-mail.json`.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -13,7 +15,7 @@ import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil
 import { Type } from "typebox";
 
 import { label, listRunning, resolveTo, type RunningRecord } from "./running.ts";
-import { send } from "./store.ts";
+import { type Envelope, send } from "./store.ts";
 
 /** What the tools need from the extension around them. */
 export type ToolHooks = {
@@ -23,7 +25,48 @@ export type ToolHooks = {
 	hops: () => number;
 	/** Report a broken `session-mail.json`; the extension shows one warning per session. */
 	configProblem: (message: string) => void;
+	/** The address this session's ask now waits on, or "" when it waits on none; written to its running record. */
+	waitingOn: (address: string) => void;
 };
+
+/** What the extension needs from the tools: the ask that is waiting. */
+export type Tools = {
+	/** Hand a reply to the waiting ask it answers; false when it answers none, so it is delivered as usual. */
+	takeAnswer: (envelope: Envelope) => boolean;
+	/** Stop waiting, as when the session shuts down. */
+	abandonAsk: () => void;
+};
+
+/** How long an ask waits for its answer (spec Q13). */
+const ASK_TIMEOUT_MS = 10 * 60 * 1000;
+/** How often a waiting ask checks that its target still runs. */
+const TARGET_CHECK_MS = 1000;
+
+/** How a waiting ask ended. */
+type AskOutcome =
+	| { outcome: "answered"; status: string; body: string }
+	| { outcome: "timed-out" }
+	| { outcome: "stopped-running" }
+	| { outcome: "stopped-by-user" };
+
+type WaitingAsk = { id: string; to: string; finish: (outcome: AskOutcome) => void };
+
+/** The ask tool's result text for an outcome. */
+function askText(ask: Envelope, target: string, outcome: AskOutcome): string {
+	const later = "A later answer arrives as a message.";
+	switch (outcome.outcome) {
+		case "answered":
+			return outcome.status === "done"
+				? `${target} answered your ask ${ask.id}:\n\n${outcome.body}`
+				: `${target} ended its run with status "${outcome.status}", not "done": this is not an answer to your ask ${ask.id}.\n\n${outcome.body}`;
+		case "timed-out":
+			return `No answer yet: ${target} did not answer your ask ${ask.id} within 10 minutes, so this session stopped waiting. ${later}`;
+		case "stopped-running":
+			return `${target} stopped running before it answered your ask ${ask.id}, so this session stopped waiting. If it resumes and answers, the answer arrives as a message.`;
+		case "stopped-by-user":
+			return `The user stopped the wait for your ask ${ask.id} to ${target}. ${later}`;
+	}
+}
 
 /** The hop limit when `session-mail.json` is missing or broken (spec Q14). */
 const DEFAULT_HOP_LIMIT = 5;
@@ -91,7 +134,10 @@ function waitLabel(address: string, byAddress: ReadonlyMap<string, RunningRecord
 	return target === undefined ? address : `${label(target)} (${address})`;
 }
 
-export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): void {
+export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
+	/** The one ask of this session that is waiting for its answer (spec Q20). */
+	let waiting: WaitingAsk | undefined;
+
 	pi.registerTool({
 		name: "session_mail_list",
 		label: "Session mail: list",
@@ -143,4 +189,75 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): void {
 			return toolResult(text, { id: envelope.id, to, running: target !== undefined });
 		},
 	});
+
+	pi.registerTool({
+		name: "session_mail_ask",
+		label: "Session mail: ask",
+		description:
+			"Ask another running Pi session on this machine a question and wait for its answer, which comes back as this tool's result. The answer is the other session's final message when its run settles, or an earlier reply it sends. The wait ends after 10 minutes, when the other session stops running, or when the user stops it; a later answer then arrives as a message. Only one ask waits at a time, and a session that is waiting on this one cannot be asked. `to` is a running session's name, an id prefix of at least 8 characters, or a full session id; session_mail_list shows who is running. For a note that needs no answer, use session_mail_send.",
+		parameters: Type.Object({
+			to: Type.String({ description: "The running session to ask: its name, an id prefix of 8+ characters, or its full session id." }),
+			message: Type.String({ description: "The question. The recipient sees it labelled as coming from this session, with this session waiting." }),
+		}),
+		async execute(
+			_toolCallId: string,
+			params: { to: string; message: string },
+			signal: AbortSignal | undefined,
+			_onUpdate: unknown,
+			ctx: ExtensionContext,
+		) {
+			const me = ctx.sessionManager.getSessionId();
+			if (waiting !== undefined)
+				throw new Error(`nothing was sent: your ask ${waiting.id} to ${waiting.to} is still waiting, and only one ask waits at a time`);
+			const body = typeof params.message === "string" ? params.message.trim() : "";
+			if (body === "") throw new Error("the question is empty; nothing was sent");
+			const to = resolveTo(typeof params.to === "string" ? params.to : "", me);
+			const record = listRunning().find((r) => r.address === to);
+			if (record === undefined)
+				throw new Error(
+					`nothing was sent: ${to} is not running, so it cannot answer; session_mail_send leaves a message that waits for it`,
+				);
+			const target = `${label(record)} (${to})`;
+			if (record.waitingOn === me)
+				throw new Error(
+					`nothing was sent: ${target} is waiting on an answer from this session, so asking it back would leave both waiting; answer it first`,
+				);
+			const hops = hooks.hops();
+			checkHops(hops, hooks);
+			const ask = send(me, to, body, { kind: "ask", hops });
+			hooks.sent();
+			const outcome = await new Promise<AskOutcome>((resolve) => {
+				const finish = (result: AskOutcome) => {
+					if (waiting?.id !== ask.id) return;
+					waiting = undefined;
+					clearTimeout(timer);
+					clearInterval(check);
+					signal?.removeEventListener("abort", onAbort);
+					hooks.waitingOn("");
+					resolve(result);
+				};
+				const onAbort = () => finish({ outcome: "stopped-by-user" });
+				const timer = setTimeout(() => finish({ outcome: "timed-out" }), ASK_TIMEOUT_MS);
+				const check = setInterval(() => {
+					if (!listRunning().some((r) => r.address === to)) finish({ outcome: "stopped-running" });
+				}, TARGET_CHECK_MS);
+				waiting = { id: ask.id, to, finish };
+				hooks.waitingOn(to);
+				if (signal?.aborted) onAbort();
+				else signal?.addEventListener("abort", onAbort, { once: true });
+			});
+			return toolResult(askText(ask, target, outcome), { id: ask.id, to, ...outcome });
+		},
+	});
+
+	return {
+		takeAnswer(envelope) {
+			if (waiting === undefined || envelope.kind !== "reply" || !envelope.in_reply_to.includes(waiting.id)) return false;
+			waiting.finish({ outcome: "answered", status: envelope.status, body: envelope.body });
+			return true;
+		},
+		abandonAsk() {
+			waiting?.finish({ outcome: "stopped-by-user" });
+		},
+	};
 }

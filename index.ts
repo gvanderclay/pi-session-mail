@@ -41,7 +41,7 @@ import {
 	type SentCopy,
 } from "./store.ts";
 import { label, listRunning, removeRecord, resolveTo, type State, writeRecord } from "./running.ts";
-import { registerTools } from "./tools.ts";
+import { registerTools, type Tools } from "./tools.ts";
 
 const CUSTOM_TYPE = "mailbox";
 const STATUS_KEY = "mailbox";
@@ -112,9 +112,14 @@ function senderLine(address: string): string {
 }
 
 /** The injected message: who it is from, how to answer it, the requests it answers, then its capped body. */
-function inboundText(envelope: Envelope, path: string, quotes: readonly string[]): string {
+function inboundText(envelope: Envelope, path: string, quotes: readonly string[], lateAnswer: boolean): string {
 	const header = [senderLine(envelope.from)];
 	if (envelope.kind === "request") header.push("Your final answer this turn goes back to it automatically.");
+	if (envelope.kind === "ask")
+		header.push(
+			`It is waiting for your answer to its ask ${envelope.id}. Answer with session_mail_reply (ask ${envelope.id}); otherwise this run's last message is sent as the answer.`,
+		);
+	if (lateAnswer) header.push("It answers an ask of yours that has stopped waiting, so it arrives as a message.");
 	if (envelope.kind === "message")
 		header.push(`It expects no answer; if one is wanted, send it with session_mail_send to ${envelope.from}.`);
 	if (envelope.in_reply_to.length > 0)
@@ -179,6 +184,8 @@ export default function mailbox(pi: ExtensionAPI) {
 	const delivered = new Set<string>();
 	/** Request ids awaiting this session's reply, keyed by sender. In memory only. */
 	let owed = new Map<string, string[]>();
+	/** Ask ids awaiting this session's answer, keyed by sender; answered apart from requests. */
+	let owedAsks = new Map<string, string[]>();
 	/** Owed request ids whose message entered the conversation (or a listener took over). */
 	let seen = new Set<string>();
 	/** Text of the last assistant message, remembered at `agent_end`. */
@@ -199,6 +206,10 @@ export default function mailbox(pi: ExtensionAPI) {
 	let name: string | undefined;
 	let cwd = "";
 	let state: State = "idle";
+	/** The address this session's ask waits on; empty when none. */
+	let waitingOn = "";
+	/** The model-facing tools, registered below; they hold the waiting ask. */
+	let tools: Tools | undefined;
 
 	/** Write this session's running-session record from the fields above. */
 	function announce() {
@@ -210,7 +221,7 @@ export default function mailbox(pi: ExtensionAPI) {
 				cwd,
 				pid: process.pid,
 				state,
-				waitingOn: "",
+				waitingOn,
 				updated: new Date().toISOString(),
 			});
 		} catch (err) {
@@ -250,16 +261,22 @@ export default function mailbox(pi: ExtensionAPI) {
 
 	function deliver(me: string, envelope: Envelope, path: string) {
 		delivered.add(envelope.id);
+		// The answer to a waiting ask is that tool call's result, and nothing else.
+		if (tools?.takeAnswer(envelope)) return;
 		const { requests, quotes } = requestQuotes(me, envelope.in_reply_to);
+		// An answer to an ask that stopped waiting is delivered like a message.
+		const lateAnswer = envelope.kind === "reply" && requests.some((copy) => copy.envelope.kind === "ask");
+		const wakes = envelope.kind !== "reply" || lateAnswer;
 		// Listeners run synchronously inside emit, so `handled` is final when it returns.
 		const inbound: InboundPayload = { envelope, path, requests, handled: false };
 		pi.events.emit(INBOUND, inbound);
 		// Only requests arm an answer: replies are never answered, and messages
 		// expect none. A request arms one even when a listener took over its display.
 		if (envelope.kind === "request") owed.set(envelope.from, [...(owed.get(envelope.from) ?? []), envelope.id]);
+		if (envelope.kind === "ask") owedAsks.set(envelope.from, [...(owedAsks.get(envelope.from) ?? []), envelope.id]);
 		// Mail that wakes or steers the session raises its count; a reply shown
 		// quietly starts no turn, but one a listener took over may.
-		if (envelope.kind !== "reply" || inbound.handled) hops = Math.max(hops, envelope.hops + 1);
+		if (wakes || inbound.handled) hops = Math.max(hops, envelope.hops + 1);
 		// `mailbox` cannot observe a listener's own message, so a takeover counts as seen.
 		if (inbound.handled) {
 			seen.add(envelope.id);
@@ -267,11 +284,11 @@ export default function mailbox(pi: ExtensionAPI) {
 		}
 		injected++;
 		pi.sendMessage(
-			{ customType: CUSTOM_TYPE, content: inboundText(envelope, path, quotes), display: true, details: { id: envelope.id } },
+			{ customType: CUSTOM_TYPE, content: inboundText(envelope, path, quotes, lateAnswer), display: true, details: { id: envelope.id } },
 			// Mail for the model wakes an idle session and steers into a busy one at
 			// its next gap between tool calls, queued user input or not; a reply only
 			// shows itself, and starts no turn.
-			envelope.kind === "reply" ? { deliverAs: "followUp" } : { triggerTurn: true, deliverAs: "steer" },
+			wakes ? { triggerTurn: true, deliverAs: "steer" } : { deliverAs: "followUp" },
 		);
 	}
 
@@ -316,11 +333,14 @@ export default function mailbox(pi: ExtensionAPI) {
 		stop();
 		ctx = context;
 		owed = new Map();
+		owedAsks = new Map();
 		seen = new Set();
 		lastAnswer = undefined;
 		lastAborted = false;
 		injected = 0;
 		hops = 0;
+		tools?.abandonAsk();
+		waitingOn = "";
 		configWarned = false;
 		const id = context.sessionManager.getSessionId();
 		if (!isAddress(id)) {
@@ -400,9 +420,11 @@ export default function mailbox(pi: ExtensionAPI) {
 		// Answers carry the settled turn's count; the next turn counts afresh.
 		const answerHops = hops;
 		hops = 0;
-		const replies = owed;
+		// Asks are answered apart from requests, so a waiting asker's answer holds its ask alone.
+		const answers = [...owed, ...owedAsks];
 		const read = seen;
 		owed = new Map();
+		owedAsks = new Map();
 		seen = new Set();
 		lastAnswer = undefined;
 		lastAborted = false;
@@ -410,7 +432,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		state = "idle";
 		announce();
 		if (me === undefined) return;
-		for (const [to, ids] of replies) {
+		for (const [to, ids] of answers) {
 			const done = ids.filter((id) => read.has(id));
 			const failed = ids.filter((id) => !read.has(id));
 			try {
@@ -427,6 +449,7 @@ export default function mailbox(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		stop();
+		tools?.abandonAsk();
 		if (address !== undefined) {
 			try {
 				removeRecord(address);
@@ -437,8 +460,12 @@ export default function mailbox(pi: ExtensionAPI) {
 		address = undefined;
 	});
 
-	registerTools(pi, {
+	tools = registerTools(pi, {
 		sent: () => updateStatus(),
+		waitingOn: (to) => {
+			waitingOn = to;
+			announce();
+		},
 		hops: () => hops,
 		configProblem: (message) => {
 			if (configWarned) return;

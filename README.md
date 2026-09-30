@@ -18,21 +18,23 @@ request it answers, capped at 2 KiB each with the `sent/` copy's path, or the
 request's id alone when this session has no copy.
 
 When the recipient's agent settles, its last answer goes back to each sender as
-one reply listing the requests it answers: `done` normally, or `stopped` when
+one reply listing the requests it answers, and as a separate reply to each
+sender's asks: `done` normally, or `stopped` when
 the user stopped the run, with the partial text. A request the session was
 stopped before reading gets a `failed` reply instead. Replies and messages are
-never answered. The footer shows `✉ N pending · N read · N awaiting`, non-zero
+never answered. The answer to an ask its sender is still waiting on becomes
+that sender's `session_mail_ask` result. The footer shows `✉ N pending · N read · N awaiting`, non-zero
 counts only; `awaiting` counts requests with no answer yet, never messages.
 
 ## Running sessions
 
 At session start each session writes a record to `<mail root>/running/<address>.json`
 (owner-only): its address, Pi session name (when one is set), working
-directory, process id, `idle` or `busy`, `waitingOn` (the address one of its
-pending asks waits on; always empty for now), and `updated`, when the record
+directory, process id, `idle` or `busy`, `waitingOn` (the address its waiting
+ask waits on, or empty), and `updated`, when the record
 last changed. The record is rewritten when the session is renamed
 (`session_info_changed`), when a run starts (`busy`) and when it settles
-(`idle`), and removed at `session_shutdown`. A record whose process no longer
+(`idle`), when an ask starts or stops waiting, and removed at `session_shutdown`. A record whose process no longer
 exists counts as not running, and whoever reads it deletes it; so does a
 session left behind by a crash.
 
@@ -41,6 +43,7 @@ The model gets these tools:
 | Tool | Parameters | What it does |
 | --- | --- | --- |
 | `session_mail_list` | none | Lists every running session, in every route: its name (or short id, the first 8 characters of its id, when it has no name), full id, working directory, idle or busy state and whom it is waiting on, and marks the calling session. |
+| `session_mail_ask` | `to`, `message` | Writes an ask (`kind: "ask"`) and waits for the answer, which is the result: its status and body, labelled as not an answer when the status is `stopped` or `failed`. The wait ends when the answer arrives, after 10 minutes ("no answer yet"), when the target's running record disappears ("stopped running"), or when the user stops the run; `waitingOn` is set while it waits and cleared in every case. Refused at once, writing nothing, when another ask of this session is waiting, when the target is not running, when the target is waiting on this session, at the [hop limit](#hop-limit), and when `to` does not resolve, is ambiguous or is this session. |
 | `session_mail_send` | `to`, `message` | Writes a message (`kind: "message"`) and returns its id. To a running session it is delivered at once; to a closed session, by full id, it waits in that session's inbox and the result says so. Refused when `to` does not resolve, is ambiguous or is this session, when the text is empty, and at the [hop limit](#hop-limit). |
 
 ## Addressing
@@ -64,14 +67,20 @@ A `to`, typed after `/mailbox` or given to a tool, resolves as follows:
 | Kind | Written by | Delivered as | Answered |
 | --- | --- | --- | --- |
 | `request` | `/mailbox <to> <text>`, `message:send` | `triggerTurn`, `deliverAs: "steer"` | yes, when the run settles |
+| `ask` | `session_mail_ask` | `triggerTurn`, `deliverAs: "steer"` | yes, when the run settles |
 | `message` | `session_mail_send` | `triggerTurn`, `deliverAs: "steer"` | never |
-| `reply` | the answering session | `deliverAs: "followUp"`, no turn | never |
+| `reply` | the answering session | `deliverAs: "followUp"`, no turn; see below for answers to asks | never |
 
 Mail for the model wakes an idle session, and reaches a busy one at its next
 gap between tool calls rather than after the run. It is never held back while
 the user has input queued. A reply starts no turn: it is shown in an idle
 session and the model sees it with the next message, unless a
 `message:inbound` listener takes it over, as `delegate` does for its tasks.
+A reply to this session's waiting ask goes to the waiting tool call as its
+result: it is neither injected nor emitted on `message:inbound`. A reply to an
+ask that is no longer waiting (it timed out, the user stopped it, or the
+session restarted) is delivered like a message: it starts a turn, and its
+label says the ask stopped waiting.
 
 Every injected message opens with a neutral label in the style of
 `pi-intercom`: `[mailbox] From <name> (<full id>, working in <cwd>), another
@@ -80,7 +89,9 @@ name and the working directory left out when the sender is not running. It
 carries no distrust wording; with a "not from the user" warning, models
 refused every request from a peer as a possible injection. Safety stays
 outside the model: an owner-only mail root on one machine. A request's label
-says the final answer this turn goes back automatically. A message's label
+says the final answer this turn goes back automatically. An ask's label says
+its sender is waiting, gives the ask id and `session_mail_reply` as the way to
+answer, and says this run's last message is sent as the answer otherwise. A message's label
 says it expects no answer and that, if one is wanted, `session_mail_send` to
 the sender's full id sends it. A reply's label names the requests it answers
 and, when its status is not `done`, says it is not an answer.
@@ -93,8 +104,8 @@ request an abort dropped before that is answered `failed`.
 Every envelope is a JSON file with `id`, `from`, `to`, `kind`, `hops`,
 `in_reply_to`, `status`, `ts` and `body`. `kind` is `request` (answered when
 the recipient settles), `reply` (an answer, naming what it answers in
-`in_reply_to`), `message` (plain mail that expects no answer), or `ask`,
-which is reserved: nothing in `mailbox` writes it yet. `hops` is a non-negative integer counting how many times a
+`in_reply_to`), `message` (plain mail that expects no answer), or `ask` (a
+question whose sender waits for the answer, answered like a request). `hops` is a non-negative integer counting how many times a
 chain of mail has woken or steered a session with no person typing (see
 [Hop limit](#hop-limit)). An envelope written before `kind` and `hops` existed
 is read as a reply when `in_reply_to` is non-empty and as a request
@@ -110,9 +121,10 @@ alike, and a reply a `message:inbound` listener took over. A reply shown
 quietly starts no turn and does not count. The count starts afresh when the
 run settles.
 
-`session_mail_send` stamps the count on its message, and is refused before
-anything is written once the count has reached the limit (5 unless
-`session-mail.json` says otherwise; see [Configuration](#configuration)). The
+`session_mail_send` and `session_mail_ask` stamp the count on their mail, and
+are refused before anything is written once the count has reached the limit
+(5 unless `session-mail.json` says otherwise; see
+[Configuration](#configuration)). The
 refusal says that a person typing in either session starts the count again.
 Automatic answers carry the count and are never refused. Requests from
 `/mailbox` and `message:send` carry 0 and are never refused: their senders act
@@ -175,14 +187,14 @@ standard one:
 
 ## Statuses
 
-A reply's `status` says what the run did. Requests carry no status.
+A reply's `status` says how the run ended, not whether the job succeeded.
+Requests, asks and messages carry no status.
 
 | `status` | Meaning |
 | --- | --- |
 | `done` | the run settled; the body is its answer |
 | `stopped` | the user stopped the run before it settled; the body says so, then the partial text |
-| `failed` | the session was stopped before it read the request; nothing was done |
-| `needs-input` | the run is waiting on the user; reserved, and nothing in `mailbox` sends it yet |
+| `failed` | the session was stopped before it read the request or ask; nothing was done |
 
 ## Hooks
 

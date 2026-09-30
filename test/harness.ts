@@ -114,10 +114,11 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 		statusCalls: () => statusCalls,
 		tools: () => Object.keys(tools).sort(),
 		tool: (toolName: string) => tools[toolName],
-		toolCall: (toolName: string, params: unknown = {}): Promise<ToolResult> => {
+		/** Call a registered tool; `signal` stands in for the user stopping the run. */
+		toolCall: (toolName: string, params: unknown = {}, signal?: AbortSignal): Promise<ToolResult> => {
 			const tool = tools[toolName];
 			if (tool === undefined) return Promise.reject(new Error(`no tool named ${toolName} is registered`));
-			return tool.execute(`call-${++calls}`, params, undefined, undefined, ctx);
+			return tool.execute(`call-${++calls}`, params, signal, undefined, ctx);
 		},
 		/** Hold back injected messages from the conversation (on) or let them in again (off). */
 		drop: (on: boolean) => {

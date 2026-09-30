@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { dir, envelopes, files, newId, records, session, stateRoot, until } from "./harness.ts";
+import { dir, envelopes, files, newId, records, session, stateRoot, turn, until } from "./harness.ts";
 
 let n = 0;
 beforeEach(() => {
@@ -92,7 +92,7 @@ test("two sessions sharing a mail root list each other, marking the caller, and 
 	const b = session(newId(), { cwd: "/work/b" });
 	await a.start();
 	await b.start();
-	assert.deepEqual(a.tools(), ["session_mail_list", "session_mail_send"]);
+	assert.deepEqual(a.tools(), ["session_mail_ask", "session_mail_list", "session_mail_send"]);
 
 	const fromA = (await a.toolCall("session_mail_list")).content[0].text;
 	assert.match(fromA, /^2 running sessions:/);
@@ -558,3 +558,221 @@ for (const [what, text] of [
 		});
 	});
 }
+
+// ---------------------------------------------------------------------------
+// session_mail_ask (pi-conversations ticket 05)
+
+type AskDetails = { id: string; to: string; outcome: string; status?: string; body?: string };
+
+test("an ask is answered at the target's settle, and the answer is the tool result", async () => {
+	const a = session(newId(), { name: "alpha" });
+	const b = session(newId(), { name: "bravo" });
+	await a.start();
+	await b.start();
+	await a.agentStart();
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "what is 6 x 7?" });
+	await until(() => b.sent.length === 1, "the ask to be injected");
+	const [ask] = envelopes(a.id, "sent");
+	assert.equal(ask.kind, "ask");
+	assert.equal(ask.hops, 0);
+	assert.equal(ask.body, "what is 6 x 7?");
+	await b.answer("42");
+	const result = await asked;
+	assert.deepEqual(result.details, { id: ask.id, to: b.id, outcome: "answered", status: "done", body: "42" });
+	assert.equal(result.content[0].text, `bravo (${b.id}) answered your ask ${ask.id}:\n\n42`);
+	assert.equal(a.sent.length, 0, "the answer is neither injected nor shown");
+	await a.shutdown();
+	await b.shutdown();
+});
+
+/** Two running sessions, alpha and bravo. */
+async function pair() {
+	const a = session(newId(), { name: "alpha" });
+	const b = session(newId(), { name: "bravo" });
+	await a.start();
+	await b.start();
+	return { a, b };
+}
+
+test("a stopped answer comes back labelled as not an answer", async () => {
+	const { a, b } = await pair();
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "long job" });
+	await until(() => b.sent.length === 1, "the ask to be injected");
+	await b.answer("half done", { aborted: true });
+	const result = await asked;
+	const details = result.details as AskDetails;
+	assert.equal(details.outcome, "answered");
+	assert.equal(details.status, "stopped");
+	assert.match(result.content[0].text, /status "stopped", not "done": this is not an answer to your ask/);
+	assert.match(result.content[0].text, /half done$/);
+	await a.shutdown();
+	await b.shutdown();
+});
+
+test("an ask gives up after 10 minutes, and a later answer arrives as a message that starts a turn", async (t) => {
+	const { a, b } = await pair();
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "slow question" });
+	t.mock.timers.tick(10 * 60 * 1000 - 1);
+	let settled = false;
+	void asked.then(() => (settled = true));
+	await turn();
+	assert.equal(settled, false, "still waiting a moment before 10 minutes");
+	t.mock.timers.tick(1);
+	const result = await asked;
+	t.mock.timers.reset();
+	assert.equal((result.details as AskDetails).outcome, "timed-out");
+	assert.match(result.content[0].text, /^No answer yet: bravo \(.*\) did not answer your ask \S+ within 10 minutes/);
+	assert.match(result.content[0].text, /A later answer arrives as a message\.$/);
+	assert.equal(records().get(a.id)?.waitingOn, "");
+
+	await until(() => b.sent.length === 1, "the ask to be injected");
+	await b.answer("finally, 42");
+	await until(() => a.sent.length === 1, "the late answer to be injected");
+	assert.deepEqual(a.sent[0].options, { triggerTurn: true, deliverAs: "steer" });
+	assert.match(a.sent[0].message.content, /answers an ask of yours that has stopped waiting/);
+	assert.match(a.sent[0].message.content, /finally, 42$/);
+	await a.shutdown();
+	await b.shutdown();
+});
+
+test("the user stopping the run ends the wait", async () => {
+	const { a, b } = await pair();
+	const stop = new AbortController();
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "hello?" }, stop.signal);
+	await until(() => records().get(a.id)?.waitingOn === b.id, "the wait to be recorded");
+	stop.abort();
+	const result = await asked;
+	assert.equal((result.details as AskDetails).outcome, "stopped-by-user");
+	assert.match(result.content[0].text, /^The user stopped the wait for your ask/);
+	assert.equal(records().get(a.id)?.waitingOn, "");
+	await a.shutdown();
+	await b.shutdown();
+});
+
+test("a target whose record disappears mid-wait is reported as stopped running", async () => {
+	const { a, b } = await pair();
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "are you there?" });
+	await b.shutdown();
+	const result = await asked;
+	assert.equal((result.details as AskDetails).outcome, "stopped-running");
+	assert.match(result.content[0].text, /^bravo \(.*\) stopped running before it answered your ask/);
+	await a.shutdown();
+});
+
+test("waitingOn shows in the list while an ask waits, and is cleared once it is answered", async () => {
+	const { a, b } = await pair();
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "q" });
+	await until(() => b.sent.length === 1, "the ask to be injected");
+	const text = (await b.toolCall("session_mail_list")).content[0].text;
+	assert.ok(text.includes(`- alpha\n  id: ${a.id}\n  cwd: ${dir}\n  state: idle, waiting on bravo (${b.id})`), text);
+	await b.answer("a");
+	await asked;
+	assert.equal(records().get(a.id)?.waitingOn, "");
+	assert.ok(!(await b.toolCall("session_mail_list")).content[0].text.includes("waiting on"));
+	await a.shutdown();
+	await b.shutdown();
+});
+
+test("a second ask is refused while one waits, writing nothing", async () => {
+	const { a, b } = await pair();
+	const c = session(newId(), { name: "charlie" });
+	await c.start();
+	const stop = new AbortController();
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "first" }, stop.signal);
+	await assert.rejects(
+		a.toolCall("session_mail_ask", { to: "charlie", message: "second" }),
+		/nothing was sent: your ask \S+ to \S+ is still waiting, and only one ask waits at a time/,
+	);
+	assert.deepEqual(files(c.id, "new").concat(files(c.id, "cur")), []);
+	stop.abort();
+	await asked;
+	await Promise.all([a.shutdown(), b.shutdown(), c.shutdown()]);
+});
+
+test("asking a session that waits on this one is refused at once", async () => {
+	const { a, b } = await pair();
+	const stop = new AbortController();
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "first" }, stop.signal);
+	await assert.rejects(
+		b.toolCall("session_mail_ask", { to: "alpha", message: "back at you" }),
+		/nothing was sent: alpha \(.*\) is waiting on an answer from this session/,
+	);
+	assert.equal(files(b.id, "sent").length, 0);
+	stop.abort();
+	await asked;
+	await a.shutdown();
+	await b.shutdown();
+});
+
+test("an ask to a session that is not running is refused, and so are this session, unknown and ambiguous names", async () => {
+	const { a, b } = await pair();
+	const closed = newId();
+	await assert.rejects(a.toolCall("session_mail_ask", { to: closed, message: "hi" }), /is not running, so it cannot answer/);
+	await assert.rejects(a.toolCall("session_mail_ask", { to: "alpha", message: "hi" }), /cannot send mail to itself/);
+	await assert.rejects(a.toolCall("session_mail_ask", { to: "nobody", message: "hi" }), /no running session is named/);
+	await assert.rejects(a.toolCall("session_mail_ask", { to: "bravo", message: " " }), /empty/);
+	assert.deepEqual(files(closed, "new"), []);
+	assert.deepEqual(files(a.id, "sent"), []);
+	assert.equal(records().get(a.id)?.waitingOn, "");
+	await a.shutdown();
+	await b.shutdown();
+});
+
+test("an ask stamps the hop count and is refused at the limit", async () => {
+	const { a, b } = await pair();
+	await a.agentStart();
+	plant(a.id, newId(), 4);
+	await until(() => a.sent.length === 1, "the message to be injected");
+	await assert.rejects(a.toolCall("session_mail_ask", { to: "bravo", message: "q" }), /hop limit of 5/);
+	assert.deepEqual(files(a.id, "sent"), []);
+	await a.input("carry on");
+	const stop = new AbortController();
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "q" }, stop.signal);
+	assert.equal(envelopes(a.id, "sent")[0].hops, 0);
+	stop.abort();
+	await asked;
+	await a.shutdown();
+	await b.shutdown();
+});
+
+test("an ask reaches its target labelled as waiting, and arms an automatic answer that raises the count", async () => {
+	const { a, b } = await pair();
+	const inbound: string[] = [];
+	b.events.on("message:inbound", (p) => void inbound.push((p as { envelope: { kind: string } }).envelope.kind));
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "the question" });
+	await until(() => b.sent.length === 1, "the ask to be injected");
+	const [ask] = envelopes(a.id, "sent");
+	assert.deepEqual(b.sent[0].options, { triggerTurn: true, deliverAs: "steer" });
+	const content = b.sent[0].message.content;
+	assert.ok(content.startsWith(`[mailbox] From alpha (${a.id}, working in `), content);
+	assert.ok(
+		content.includes(
+			`It is waiting for your answer to its ask ${ask.id}. Answer with session_mail_reply (ask ${ask.id}); otherwise this run's last message is sent as the answer.`,
+		),
+		content,
+	);
+	assert.match(content, /the question$/);
+	assert.deepEqual(inbound, ["ask"]);
+	await b.answer("the answer");
+	await asked;
+	const [answer] = envelopes(a.id, "cur");
+	assert.deepEqual(answer.in_reply_to, [ask.id]);
+	assert.equal(answer.hops, 1);
+	await a.shutdown();
+	await b.shutdown();
+});
+
+test("the answer to a waiting ask is not emitted on message:inbound", async () => {
+	const { a, b } = await pair();
+	const inbound: string[] = [];
+	a.events.on("message:inbound", (p) => void inbound.push((p as { envelope: { kind: string } }).envelope.kind));
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "q" });
+	await until(() => b.sent.length === 1, "the ask to be injected");
+	await b.answer("a");
+	await asked;
+	assert.deepEqual(inbound, []);
+	assert.equal(a.sent.length, 0);
+	await a.shutdown();
+	await b.shutdown();
+});
