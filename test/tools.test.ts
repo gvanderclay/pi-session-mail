@@ -359,7 +359,7 @@ test("session_mail_send refuses an empty text, an unknown or ambiguous to, and t
 });
 
 // ---------------------------------------------------------------------------
-// Hop limit (pi-conversations ticket 04)
+// Hop limit
 
 let planted = 0;
 /** An envelope written by hand into `to`'s new/, as a session at hop count `hops` would send it. */
@@ -560,7 +560,7 @@ for (const [what, text] of [
 }
 
 // ---------------------------------------------------------------------------
-// session_mail_ask (pi-conversations ticket 05)
+// session_mail_ask
 
 type AskDetails = { id: string; to: string; outcome: string; status?: string; body?: string };
 
@@ -780,7 +780,7 @@ test("the answer to a waiting ask is not emitted on message:inbound", async () =
 });
 
 // ---------------------------------------------------------------------------
-// session_mail_reply (pi-conversations ticket 06)
+// session_mail_reply
 
 test("a reply mid-run answers the ask before the answerer settles, and settle sends no second answer", async () => {
 	const { a, b } = await pair();

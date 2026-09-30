@@ -15,7 +15,7 @@ import { box, dir, envelopes, files, newId, session, stateRoot, turn, until } fr
 const root = stateRoot();
 
 // ---------------------------------------------------------------------------
-// Addressing and sending (ticket 01)
+// Addressing and sending
 
 test("/mailbox with no arguments shows the session's address", async () => {
 	const a = session(newId("a"));
@@ -101,7 +101,7 @@ test("an invalid address is rejected before any path is built", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Receiving (ticket 02)
+// Receiving
 
 test("a running session claims a message into cur/ and injects it once as labelled steered mail that starts a turn", async () => {
 	const a = session(newId("a"));
@@ -268,7 +268,7 @@ test("after session_shutdown nothing more is delivered", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Replying (ticket 03)
+// Replying
 
 test("a request is answered once the recipient settles, not at agent_end, and the reply reaches the sender", async () => {
 	const a = session(newId("a"));
@@ -401,7 +401,7 @@ test("an envelope with an invalid from gets no reply", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Unseen requests (ticket 07)
+// Unseen requests
 
 test("a request dropped before it entered the conversation is answered failed, not done", async () => {
 	const a = session(newId("a"));
@@ -458,7 +458,7 @@ test("a failed reply is injected with a header saying the request failed", async
 });
 
 // ---------------------------------------------------------------------------
-// Stopped runs, quoted requests, quiet replies (delegate ticket 02)
+// Stopped runs, quoted requests, quiet replies
 
 test("a run the user stopped replies stopped, noting the stop and the partial text", async () => {
 	const a = session(newId("a"));
@@ -681,7 +681,7 @@ test("a sent/ file whose name matches but whose envelope id differs is not quote
 });
 
 // ---------------------------------------------------------------------------
-// pi.events interface (ticket 04)
+// pi.events interface
 
 type SendPayload = { to: unknown; body: unknown; envelope?: { id: string; to: string; from: string }; error?: string };
 
@@ -785,7 +785,7 @@ test("a listener that sets handled stops the injection, but a request still gets
 });
 
 // ---------------------------------------------------------------------------
-// Statusline (ticket 05)
+// Statusline
 
 test("a session with an empty mailbox shows no mailbox status", async () => {
 	const a = session(newId("a"));
