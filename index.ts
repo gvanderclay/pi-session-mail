@@ -105,15 +105,34 @@ function requestQuotes(me: string, ids: readonly string[]): { requests: SentCopy
  * directory. No distrust wording: with it, models refused every peer request
  * as a possible injection (spec Q37). Safety lives outside the model.
  */
-function senderLine(address: string): string {
+function senderLine(address: string): { line: string; name: string } {
 	const record = listRunning().find((r) => r.address === address);
 	const where = record === undefined ? "" : `, working in ${record.cwd}`;
-	return `[mailbox] From ${label(record ?? { address })} (${address}${where}), another Pi session on this machine.`;
+	const name = label(record ?? { address });
+	return { line: `[mailbox] From ${name} (${address}${where}), another Pi session on this machine.`, name };
 }
 
-/** The injected message: who it is from, how to answer it, the requests it answers, then its capped body. */
-function inboundText(envelope: Envelope, path: string, quotes: readonly string[], lateAnswer: boolean): string {
-	const header = [senderLine(envelope.from)];
+/**
+ * The last line of injected mail. Pi hands a custom message to the model as a
+ * user message, and the Anthropic API joins it with the user's next typed
+ * prompt into one turn, so without this line that prompt reads as the mail's.
+ */
+const endLine = (name: string) => `[mailbox] End of the mail from ${name}. Text after this line is not part of it.`;
+
+/**
+ * The injected message: who it is from, how to answer it, the requests it
+ * answers, its capped body, then a line ending it. `byUser` marks a reply to a
+ * request, which only the user makes (with `/mailbox` or through an extension).
+ */
+function inboundText(
+	envelope: Envelope,
+	path: string,
+	quotes: readonly string[],
+	opts: { lateAnswer: boolean; byUser: boolean },
+): string {
+	const { lateAnswer, byUser } = opts;
+	const sender = senderLine(envelope.from);
+	const header = [sender.line];
 	if (envelope.kind === "request") header.push("Your final answer this turn goes back to it automatically.");
 	if (envelope.kind === "ask")
 		header.push(
@@ -124,11 +143,13 @@ function inboundText(envelope: Envelope, path: string, quotes: readonly string[]
 		header.push(`It expects no answer; if one is wanted, send it with session_mail_send to ${envelope.from}.`);
 	if (envelope.in_reply_to.length > 0)
 		header.push(`It is a reply to your request${envelope.in_reply_to.length > 1 ? "s" : ""} ${envelope.in_reply_to.join(", ")}.`);
+	if (byUser)
+		header.push("The user made that request, typing it with /mailbox or through an extension such as delegate.");
 	if (envelope.in_reply_to.length > 0 && envelope.status !== "done")
 		header.push(`Its status is "${envelope.status}", not "done": it is not an answer.`);
 	const cut = cap(envelope.body, BODY_CAP);
 	const body = cut === undefined ? envelope.body : `${cut}\n\n[mailbox] Body cut at 32 KiB; the full envelope is ${path}`;
-	return [header.join(" "), ...quotes, body].join("\n\n");
+	return [header.join(" "), ...quotes, body, endLine(sender.name)].join("\n\n");
 }
 
 /**
@@ -156,6 +177,17 @@ function lastAssistant(messages: readonly unknown[]): Message | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i] as Message;
 		if (message?.role === "assistant") return message;
+	}
+	return undefined;
+}
+
+/** The text of the last assistant message that has any; undefined when none has. */
+function lastAssistantText(messages: readonly unknown[]): string | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i] as Message;
+		if (message?.role !== "assistant") continue;
+		const text = assistantText(message);
+		if (text !== undefined) return text;
 	}
 	return undefined;
 }
@@ -192,7 +224,7 @@ export default function mailbox(pi: ExtensionAPI) {
 	let seen = new Set<string>();
 	/** Text of the last assistant message, remembered at `agent_end`. */
 	let lastAnswer: string | undefined;
-	/** Whether that message's run was aborted (`stopReason: "aborted"`). */
+	/** Whether the user stopped that run, whatever its last message's `stopReason`. */
 	let lastAborted = false;
 	/** Messages injected since the last settle, for the status's pending count. */
 	let injected = 0;
@@ -270,6 +302,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		// An answer to an ask that stopped waiting is delivered like a message.
 		const lateAnswer = envelope.kind === "reply" && requests.some((copy) => copy.envelope.kind === "ask");
 		const wakes = envelope.kind !== "reply" || lateAnswer;
+		const byUser = envelope.kind === "reply" && requests.some((copy) => copy.envelope.kind === "request");
 		// Listeners run synchronously inside emit, so `handled` is final when it returns.
 		const inbound: InboundPayload = { envelope, path, requests, handled: false };
 		pi.events.emit(INBOUND, inbound);
@@ -287,7 +320,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		}
 		injected++;
 		pi.sendMessage(
-			{ customType: CUSTOM_TYPE, content: inboundText(envelope, path, quotes, lateAnswer), display: true, details: { id: envelope.id } },
+			{ customType: CUSTOM_TYPE, content: inboundText(envelope, path, quotes, { lateAnswer, byUser }), display: true, details: { id: envelope.id } },
 			// Mail for the model wakes an idle session and steers into a busy one at
 			// its next gap between tool calls, queued user input or not; a reply only
 			// shows itself, and starts no turn.
@@ -403,10 +436,14 @@ export default function mailbox(pi: ExtensionAPI) {
 		announce();
 	});
 
-	pi.on("agent_end", async (event) => {
+	// Esc aborts the run's signal. Stopped mid-text, the last message says
+	// `aborted`; stopped during a tool call, Pi 0.99.1 ends the run with an empty
+	// `error` message instead, so the signal is what tells a stop apart. The
+	// partial answer is then the last text the model wrote before the stop.
+	pi.on("agent_end", async (event, context) => {
 		const last = lastAssistant(event.messages);
-		lastAnswer = last === undefined ? undefined : assistantText(last);
-		lastAborted = last?.stopReason === "aborted";
+		lastAborted = last?.stopReason === "aborted" || context.signal?.aborted === true;
+		lastAnswer = lastAborted ? lastAssistantText(event.messages) : last === undefined ? undefined : assistantText(last);
 	});
 
 	// Reply only once Pi will not continue on its own: a retry, compaction or

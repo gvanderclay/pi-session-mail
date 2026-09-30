@@ -96,7 +96,15 @@ its sender is waiting, gives the ask id and `session_mail_reply` as the way to
 answer, and says this run's last message is sent as the answer otherwise. A message's label
 says it expects no answer and that, if one is wanted, `session_mail_send` to
 the sender's full id sends it. A reply's label names the requests it answers
-and, when its status is not `done`, says it is not an answer.
+and, when its status is not `done`, says it is not an answer. A reply to a
+request also says the user made that request, typing it with `/mailbox` or
+through an extension such as `delegate`, since only the user makes requests.
+
+Every injected message ends with `[mailbox] End of the mail from <name>. Text
+after this line is not part of it.` Pi hands the model a custom message as a
+user message, and the Anthropic API joins it with the next typed prompt into
+one turn. A quiet reply starts no turn, so the user's next prompt lands right
+after it; without the end line, models read that prompt as part of the mail.
 
 Mail counts as read when it enters the conversation (`message_end`). A
 request an abort dropped before that is answered `failed`.

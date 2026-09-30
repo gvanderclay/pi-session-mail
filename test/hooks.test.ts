@@ -164,7 +164,7 @@ test("the README's message:inbound example takes over a reply, quoting its reque
 		p.events.emit("message:send", { to: s.id, body: "a request" });
 		await until(() => s.sent.length === 1, "the request to be injected");
 		assert.equal(s.sent[0].message.customType, "mailbox");
-		assert.match(s.sent[0].message.content, /a request$/);
+		assert.match(s.sent[0].message.content, /a request\n\n\[mailbox\] End of the mail from /);
 		assert.deepEqual(payloads[0].requests, []);
 
 		// A reply to a request `s` sent is the example's: it injects its own message.

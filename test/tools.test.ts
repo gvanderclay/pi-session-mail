@@ -292,7 +292,7 @@ test("a message to an idle session starts a turn by steering, labelled with the 
 	assert.ok(content.startsWith(`[mailbox] From alpha (${a.id}, working in `), content);
 	assert.match(content, /\), another Pi session on this machine\. It expects no answer; if one is wanted, send it with session_mail_send to /);
 	assert.ok(!/not from the user|untrusted/.test(content), content);
-	assert.match(content, /heads up$/);
+	assert.match(content, /heads up\n\n\[mailbox\] End of the mail from /);
 	await a.shutdown();
 	await b.shutdown();
 });
@@ -631,7 +631,9 @@ test("an ask gives up after 10 minutes, and a later answer arrives as a message 
 	await until(() => a.sent.length === 1, "the late answer to be injected");
 	assert.deepEqual(a.sent[0].options, { triggerTurn: true, deliverAs: "steer" });
 	assert.match(a.sent[0].message.content, /answers an ask of yours that has stopped waiting/);
-	assert.match(a.sent[0].message.content, /finally, 42$/);
+	assert.match(a.sent[0].message.content, /finally, 42\n\n\[mailbox\] End of the mail from /);
+	// The model sent the ask, so its answer is not labelled as the user's request.
+	assert.doesNotMatch(a.sent[0].message.content, /The user made that request/);
 	await a.shutdown();
 	await b.shutdown();
 });
@@ -752,7 +754,7 @@ test("an ask reaches its target labelled as waiting, and arms an automatic answe
 		),
 		content,
 	);
-	assert.match(content, /the question$/);
+	assert.match(content, /the question\n\n\[mailbox\] End of the mail from /);
 	assert.deepEqual(inbound, ["ask"]);
 	await b.answer("the answer");
 	await asked;

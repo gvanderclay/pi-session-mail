@@ -63,6 +63,8 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 	let statusCalls = 0;
 	let name = opts.name;
 	let idle = true;
+	/** The running agent's abort signal, as `ctx.signal` gives it; undefined when no run is active. */
+	let signal: AbortSignal | undefined;
 	/** While true, injected messages never enter the conversation, as when an abort drops Pi's follow-up queue. */
 	let dropping = false;
 	const events = createEventBus();
@@ -87,6 +89,9 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 		cwd: opts.cwd ?? dir,
 		hasUI: opts.hasUI ?? true,
 		isIdle: () => idle,
+		get signal() {
+			return signal;
+		},
 		sessionManager: { getSessionId: () => sessionId, getSessionName: () => name },
 		ui: {
 			notify: (msg: string, type?: string) =>
@@ -159,6 +164,37 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 					stopReason: options.aborted ? "aborted" : "stop",
 				});
 			await fire("agent_end", { messages });
+			idle = true;
+			await fire("agent_settled");
+		},
+		/**
+		 * One agent run the user stopped (Esc) while a tool ran, then settling, as
+		 * Pi 0.99.1 ends it: the tool result says `Command aborted`, the next model
+		 * call fails with `stopReason: "error"`, and the run's signal is aborted
+		 * until the run finishes. `text` is what the model wrote before the call.
+		 */
+		stopInToolCall: async (text?: string) => {
+			idle = false;
+			const run = new AbortController();
+			signal = run.signal;
+			await fire("agent_start");
+			run.abort();
+			await fire("agent_end", {
+				messages: [
+					{ role: "user", content: [{ type: "text", text: "q" }] },
+					{
+						role: "assistant",
+						content: [
+							...(text === undefined ? [] : [{ type: "text", text }]),
+							{ type: "toolCall", id: "t1", name: "bash", arguments: { command: "sleep 3000" } },
+						],
+						stopReason: "toolUse",
+					},
+					{ role: "toolResult", toolCallId: "t1", toolName: "bash", content: [{ type: "text", text: "Command aborted" }], isError: true },
+					{ role: "assistant", content: [], stopReason: "error", errorMessage: "This operation was aborted" },
+				],
+			});
+			signal = undefined;
 			idle = true;
 			await fire("agent_settled");
 		},

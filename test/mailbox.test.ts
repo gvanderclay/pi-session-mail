@@ -118,7 +118,7 @@ test("a running session claims a message into cur/ and injects it once as labell
 		assert.match(message.content, new RegExp(`^\\[mailbox\\] From \\S+ \\(${a.id}, working in [^)]+\\), another Pi session on this machine\\.`));
 		assert.match(message.content, /final answer this turn goes back to it automatically/);
 		assert.ok(!/not from the user|untrusted|injection/.test(message.content), message.content);
-		assert.match(message.content, /what is 2 \+ 2\?$/);
+		assert.match(message.content, /what is 2 \+ 2\?\n\n\[mailbox\] End of the mail from /);
 		assert.deepEqual(files(b.id, "new"), []);
 		assert.equal(files(b.id, "cur").length, 1);
 		await new Promise((r) => setTimeout(r, 1300)); // a further poll finds nothing new
@@ -136,7 +136,7 @@ test("messages are delivered in send order", async () => {
 	await b.start();
 	await b.shutdown();
 	assert.deepEqual(
-		b.sent.map((s) => s.message.content.split("\n").at(-1)),
+		b.sent.map((s) => s.message.content.split("\n").at(-3)),
 		["first", "second", "third"],
 	);
 });
@@ -153,7 +153,7 @@ test("mail waiting at session start is claimed after a turn, never inside sessio
 	await turn();
 	assert.equal(seen.length, 1);
 	assert.equal(b.sent.length, 1);
-	assert.match(b.sent[0].message.content, /waiting$/);
+	assert.match(b.sent[0].message.content, /waiting\n\n\[mailbox\] End of the mail from /);
 	await b.shutdown();
 });
 
@@ -197,7 +197,7 @@ test("a body over 32 KiB is cut, with the envelope's cur/ path; a smaller one pa
 	await b.start();
 	await b.shutdown();
 	assert.equal(b.sent.length, 2);
-	assert.ok(b.sent[0].message.content.endsWith(small));
+	assert.ok(b.sent[0].message.content.includes(`\n\n${small}\n\n[mailbox] End of the mail from `));
 	const cut = b.sent[1].message.content;
 	// the two-byte é straddles the 32 KiB mark, so the cut backs off to before it
 	assert.ok(cut.includes(`\n\n${"x".repeat(32 * 1024 - 1)}\n\n`));
@@ -232,7 +232,7 @@ test("a malformed envelope is set aside in cur/ with one warning and does not bl
 	await b.start();
 	await b.shutdown();
 	assert.equal(b.sent.length, 1);
-	assert.match(b.sent[0].message.content, /still works$/);
+	assert.match(b.sent[0].message.content, /still works\n\n\[mailbox\] End of the mail from /);
 	assert.equal(b.warnings.length, 2);
 	assert.ok(files(b.id, "cur").includes("000000000000001-bad.json"));
 	assert.ok(files(b.id, "cur").includes("000000000000002-evil.json"));
@@ -252,7 +252,7 @@ test("mail sent before a session starts is delivered at its start, and a resumed
 	await resumed.start("resume");
 	await resumed.shutdown();
 	assert.equal(resumed.sent.length, 1);
-	assert.match(resumed.sent[0].message.content, /while closed$/);
+	assert.match(resumed.sent[0].message.content, /while closed\n\n\[mailbox\] End of the mail from /);
 });
 
 test("after session_shutdown nothing more is delivered", async () => {
@@ -294,7 +294,7 @@ test("a request is answered once the recipient settles, not at agent_end, and th
 	assert.equal(a.sent.length, 1);
 	assert.match(a.sent[0].message.content, new RegExp(`^\\[mailbox\\] From \\S+ \\(${b.id}[,)]`));
 	assert.match(a.sent[0].message.content, new RegExp(`reply to your request ${request.id}`));
-	assert.match(a.sent[0].message.content, /It is 4\.$/);
+	assert.match(a.sent[0].message.content, /It is 4\.\n\n\[mailbox\] End of the mail from /);
 });
 
 test("one reply per sender per settle lists every request it answers", async () => {
@@ -491,6 +491,30 @@ test("a stopped run with no partial text still says the user stopped it", async 
 	assert.doesNotMatch(reply.body, /no answer/i);
 });
 
+test("a run the user stopped during a tool call replies stopped, with the text before the call", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.mailbox(`${b.id} do the thing`);
+	await b.start();
+	await b.stopInToolCall("Sleeping first.");
+	const [reply] = envelopes(a.id, "new");
+	assert.equal(reply.status, "stopped");
+	assert.match(reply.body, /^\(The user stopped this run/);
+	assert.ok(reply.body.includes("Sleeping first."), reply.body);
+});
+
+test("a run stopped during a tool call with no text before it still replies stopped", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.mailbox(`${b.id} do the thing`);
+	await b.start();
+	await b.stopInToolCall();
+	const [reply] = envelopes(a.id, "new");
+	assert.equal(reply.status, "stopped");
+	assert.match(reply.body, /^\(The user stopped this run/);
+	assert.doesNotMatch(reply.body, /no answer/i);
+});
+
 test("a stopped run's unseen requests still get a failed reply", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
@@ -528,7 +552,7 @@ test("an injected reply quotes every request it answers with its sent/ copy's pa
 	assert.ok(text.includes(join(box(a.id, "sent"), copies[0])), text);
 	assert.ok(text.includes(join(box(a.id, "sent"), copies[1])), text);
 	assert.ok(text.includes(ids[0]) && text.includes(ids[1]), text);
-	assert.match(text, /both answered$/);
+	assert.match(text, /both answered\n\n\[mailbox\] End of the mail from /);
 });
 
 test("a request over 2 KiB is quoted cut on a character boundary, naming its copy", async () => {
@@ -548,7 +572,7 @@ test("a request over 2 KiB is quoted cut on a character boundary, naming its cop
 	assert.ok(!text.includes("xé"), text);
 	assert.match(text, /Request cut at 2 KiB/);
 	assert.ok(text.includes(join(box(a.id, "sent"), copy)), text);
-	assert.match(text, /short$/);
+	assert.match(text, /short\n\n\[mailbox\] End of the mail from /);
 });
 
 test("a reply to a request with no sent/ copy names the id and still delivers", async () => {
@@ -568,7 +592,7 @@ test("a reply to a request with no sent/ copy names the id and still delivers", 
 	await b.shutdown();
 	assert.equal(b.sent.length, 1);
 	assert.match(b.sent[0].message.content, /ghost-request has no copy in sent\//);
-	assert.match(b.sent[0].message.content, /the answer$/);
+	assert.match(b.sent[0].message.content, /the answer\n\n\[mailbox\] End of the mail from /);
 });
 
 test("an injected reply does not trigger a turn; an injected request still does", async () => {
@@ -582,6 +606,34 @@ test("an injected reply does not trigger a turn; an injected request still does"
 	await b.shutdown();
 	assert.deepEqual(b.sent[0].options, { triggerTurn: true, deliverAs: "steer" });
 	assert.deepEqual(a.sent[0].options, { deliverAs: "followUp" });
+});
+
+test("injected mail ends with a line closing it, so text after it reads as not the sender's", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"), { name: "bravo" });
+	await b.start();
+	await a.mailbox(`${b.id} question`);
+	await until(() => b.sent.length === 1, "B to receive");
+	await b.answer("answer");
+	await a.start();
+	await a.shutdown();
+	await b.shutdown();
+	assert.match(b.sent[0].message.content, /question\n\n\[mailbox\] End of the mail from \S+\. Text after this line is not part of it\.$/);
+	assert.match(a.sent[0].message.content, /answer\n\n\[mailbox\] End of the mail from bravo\. Text after this line is not part of it\.$/);
+});
+
+test("a quiet reply says the user made the request, with /mailbox or through an extension", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.mailbox(`${b.id} question`);
+	await b.start();
+	await b.answer("answer");
+	await a.start();
+	await a.shutdown();
+	await b.shutdown();
+	const header = a.sent[0].message.content.split("\n")[0];
+	assert.match(header, /The user made that request, typing it with \/mailbox or through an extension such as delegate\./);
+	assert.ok(!/not from the user|untrusted|injection/.test(a.sent[0].message.content), a.sent[0].message.content);
 });
 
 test("a sent/ file whose name matches but whose envelope id differs is not quoted", async () => {
