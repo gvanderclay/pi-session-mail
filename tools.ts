@@ -5,8 +5,9 @@
 // every route, and marks the calling one. `session_mail_send` leaves a plain
 // message, which wakes or steers its recipient and expects no answer.
 // `session_mail_ask` leaves an ask and waits, one at a time, for the answer,
-// which comes back as its result rather than as a message. Mail a tool sends
-// carries the turn's hop count and is refused once the count
+// which comes back as its result rather than as a message.
+// `session_mail_reply` answers an ask this session received, mid-run. Mail a
+// tool sends carries the turn's hop count and is refused once the count
 // reaches `hopLimit` from `<agent dir>/session-mail.json`.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -27,6 +28,8 @@ export type ToolHooks = {
 	configProblem: (message: string) => void;
 	/** The address this session's ask now waits on, or "" when it waits on none; written to its running record. */
 	waitingOn: (address: string) => void;
+	/** Answer the open ask `id` this session received with `body` at once; throws, sending nothing, when it cannot. */
+	reply: (id: string, body: string) => Envelope;
 };
 
 /** What the extension needs from the tools: the ask that is waiting. */
@@ -247,6 +250,31 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 				else signal?.addEventListener("abort", onAbort, { once: true });
 			});
 			return toolResult(askText(ask, target, outcome), { id: ask.id, to, ...outcome });
+		},
+	});
+
+	pi.registerTool({
+		name: "session_mail_reply",
+		label: "Session mail: reply",
+		description:
+			"Answer an ask another Pi session sent this session, at once, without ending this run. The asker is waiting, and gets the message as the answer to its ask; the answer this run's last message would otherwise send is then skipped for that ask. `ask` is the ask id its label gives. Each ask is answered once; requests are answered automatically when the run settles, and messages expect no answer.",
+		parameters: Type.Object({
+			ask: Type.String({ description: "The ask id, as given in the ask's label." }),
+			message: Type.String({ description: "The answer." }),
+		}),
+		async execute(_toolCallId: string, params: { ask: string; message: string }) {
+			const id = typeof params.ask === "string" ? params.ask.trim() : "";
+			const body = typeof params.message === "string" ? params.message.trim() : "";
+			if (body === "") throw new Error("the answer is empty; nothing was sent");
+			const answer = hooks.reply(id, body);
+			hooks.sent();
+			const sender = listRunning().find((record) => record.address === answer.to);
+			const who = sender === undefined ? answer.to : `${label(sender)} (${answer.to})`;
+			return toolResult(`Answered ask ${id} from ${who}; this run's last message will not be sent for it.`, {
+				id: answer.id,
+				ask: id,
+				to: answer.to,
+			});
 		},
 	});
 

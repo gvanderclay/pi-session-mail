@@ -19,12 +19,13 @@ request's id alone when this session has no copy.
 
 When the recipient's agent settles, its last answer goes back to each sender as
 one reply listing the requests it answers, and as a separate reply to each
-sender's asks: `done` normally, or `stopped` when
-the user stopped the run, with the partial text. A request the session was
-stopped before reading gets a `failed` reply instead. Replies and messages are
-never answered. The answer to an ask its sender is still waiting on becomes
-that sender's `session_mail_ask` result. The footer shows `✉ N pending · N read · N awaiting`, non-zero
-counts only; `awaiting` counts requests with no answer yet, never messages.
+sender's asks not already answered with `session_mail_reply`: `done`
+normally, or `stopped` when the user stopped the run, with the partial text.
+A request the session was stopped before reading gets a `failed` reply
+instead. Replies and messages are never answered. The answer to an ask its
+sender is still waiting on becomes that sender's `session_mail_ask` result.
+The footer shows `✉ N pending · N read · N awaiting`, non-zero counts only;
+`awaiting` counts requests with no answer yet, never messages.
 
 ## Running sessions
 
@@ -38,12 +39,13 @@ last changed. The record is rewritten when the session is renamed
 exists counts as not running, and whoever reads it deletes it; so does a
 session left behind by a crash.
 
-The model gets these tools:
+The model gets four tools:
 
 | Tool | Parameters | What it does |
 | --- | --- | --- |
 | `session_mail_list` | none | Lists every running session, in every route: its name (or short id, the first 8 characters of its id, when it has no name), full id, working directory, idle or busy state and whom it is waiting on, and marks the calling session. |
 | `session_mail_ask` | `to`, `message` | Writes an ask (`kind: "ask"`) and waits for the answer, which is the result: its status and body, labelled as not an answer when the status is `stopped` or `failed`. The wait ends when the answer arrives, after 10 minutes ("no answer yet"), when the target's running record disappears ("stopped running"), or when the user stops the run; `waitingOn` is set while it waits and cleared in every case. Refused at once, writing nothing, when another ask of this session is waiting, when the target is not running, when the target is waiting on this session, at the [hop limit](#hop-limit), and when `to` does not resolve, is ambiguous or is this session. |
+| `session_mail_reply` | `ask`, `message` | Answers one open ask this session received, at once, with status `done` and the turn's hop count, without ending the run; the asker's `session_mail_ask` returns with it. The answer at settle then leaves that ask out, while the sender's other requests and asks are still answered. Refused, sending nothing, for an ask already answered (by this tool or at settle), for a request (answered at settle), a message or a reply, for an id that never reached this session, and for an empty text. |
 | `session_mail_send` | `to`, `message` | Writes a message (`kind: "message"`) and returns its id. To a running session it is delivered at once; to a closed session, by full id, it waits in that session's inbox and the result says so. Refused when `to` does not resolve, is ambiguous or is this session, when the text is empty, and at the [hop limit](#hop-limit). |
 
 ## Addressing
@@ -157,7 +159,8 @@ in the npm tarball.
 - `typebox` for the tools' parameter schemas, a host-provided package
   declared as a peer dependency and supplied by Pi.
 - `@earendil-works/pi-coding-agent` for the extension types, `getAgentDir`
-  (to find `session-mail.json`) and the test harness's event bus, declared as a peer dependency and supplied by Pi.
+  (to find `session-mail.json`) and the test harness's event bus, declared as
+  a peer dependency and supplied by Pi.
 - A writable state directory. The mail root lives under
   `$XDG_STATE_HOME/pi-session-mail/` (see above) and is safe to delete while
   no session is running.
@@ -174,7 +177,7 @@ in the npm tarball.
 
 | Key | Effect |
 | --- | --- |
-| `hopLimit` | A positive integer: how many hops a chain of sessions waking each other may reach before `session_mail_send` is refused. Default 5. |
+| `hopLimit` | A positive integer: how many hops a chain of sessions waking each other may reach before `session_mail_send` and `session_mail_ask` are refused. Default 5. |
 
 The file is read at each send. A missing file, or one without `hopLimit`,
 means 5. An unreadable or invalid file also means 5, with one warning per

@@ -182,6 +182,8 @@ export default function mailbox(pi: ExtensionAPI) {
 	let timer: ReturnType<typeof setInterval> | undefined;
 	/** Envelope ids already handed to Pi in this process. */
 	const delivered = new Set<string>();
+	/** The kind of each envelope this session has claimed, by id, so a reply can say why it is refused. */
+	const receivedKinds = new Map<string, Envelope["kind"]>();
 	/** Request ids awaiting this session's reply, keyed by sender. In memory only. */
 	let owed = new Map<string, string[]>();
 	/** Ask ids awaiting this session's answer, keyed by sender; answered apart from requests. */
@@ -261,6 +263,7 @@ export default function mailbox(pi: ExtensionAPI) {
 
 	function deliver(me: string, envelope: Envelope, path: string) {
 		delivered.add(envelope.id);
+		receivedKinds.set(envelope.id, envelope.kind);
 		// The answer to a waiting ask is that tool call's result, and nothing else.
 		if (tools?.takeAnswer(envelope)) return;
 		const { requests, quotes } = requestQuotes(me, envelope.in_reply_to);
@@ -465,6 +468,25 @@ export default function mailbox(pi: ExtensionAPI) {
 		waitingOn: (to) => {
 			waitingOn = to;
 			announce();
+		},
+		reply: (id, body) => {
+			const me = address;
+			if (me === undefined) throw new Error("this session has no mailbox address; nothing was sent");
+			const kind = receivedKinds.get(id);
+			if (kind === undefined) throw new Error(`no mail with id ${JSON.stringify(id)} reached this session; nothing was sent`);
+			if (kind !== "ask")
+				throw new Error(
+					`${id} is a ${kind}, not an ask; nothing was sent. ${kind === "request" ? "A request is answered automatically when this run settles." : kind === "message" ? "A message expects no answer; session_mail_send sends one if it is wanted." : "A reply is never answered."}`,
+				);
+			const from = [...owedAsks].find(([, ids]) => ids.includes(id))?.[0];
+			// An answered ask, by this tool or at settle, is no longer owed.
+			if (from === undefined) throw new Error(`ask ${id} is already answered; nothing was sent`);
+			// Answers carry the turn's count and are never refused by the hop limit.
+			const answer = send(me, from, body, { kind: "reply", hops, inReplyTo: [id], status: "done" });
+			const rest = (owedAsks.get(from) ?? []).filter((owedId) => owedId !== id);
+			if (rest.length > 0) owedAsks.set(from, rest);
+			else owedAsks.delete(from);
+			return answer;
 		},
 		hops: () => hops,
 		configProblem: (message) => {

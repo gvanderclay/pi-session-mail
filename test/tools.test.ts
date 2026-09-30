@@ -92,7 +92,7 @@ test("two sessions sharing a mail root list each other, marking the caller, and 
 	const b = session(newId(), { cwd: "/work/b" });
 	await a.start();
 	await b.start();
-	assert.deepEqual(a.tools(), ["session_mail_ask", "session_mail_list", "session_mail_send"]);
+	assert.deepEqual(a.tools(), ["session_mail_ask", "session_mail_list", "session_mail_reply", "session_mail_send"]);
 
 	const fromA = (await a.toolCall("session_mail_list")).content[0].text;
 	assert.match(fromA, /^2 running sessions:/);
@@ -773,6 +773,98 @@ test("the answer to a waiting ask is not emitted on message:inbound", async () =
 	await asked;
 	assert.deepEqual(inbound, []);
 	assert.equal(a.sent.length, 0);
+	await a.shutdown();
+	await b.shutdown();
+});
+
+// ---------------------------------------------------------------------------
+// session_mail_reply (pi-conversations ticket 06)
+
+test("a reply mid-run answers the ask before the answerer settles, and settle sends no second answer", async () => {
+	const { a, b } = await pair();
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "quick one" });
+	await until(() => b.sent.length === 1, "the ask to be injected");
+	const [ask] = envelopes(a.id, "sent");
+	await b.agentStart();
+	plant(b.id, newId(), 1); // the run's count is 2 when it replies
+	await until(() => b.sent.length === 2, "a message to be steered in");
+	const replied = await b.toolCall("session_mail_reply", { ask: ask.id, message: "  right away  " });
+	const result = await asked;
+	assert.deepEqual(result.details, { id: ask.id, to: b.id, outcome: "answered", status: "done", body: "right away" });
+	const [answer] = envelopes(a.id, "cur");
+	assert.equal(answer.kind, "reply");
+	assert.equal(answer.hops, 2);
+	assert.deepEqual(answer.in_reply_to, [ask.id]);
+	assert.match(replied.content[0].text, new RegExp(`^Answered ask ${ask.id} from alpha`));
+	await b.agentEnd("the final message");
+	await b.settle();
+	assert.equal(envelopes(a.id, "new").length + envelopes(a.id, "cur").length, 1, "no second answer");
+	await a.shutdown();
+	await b.shutdown();
+});
+
+test("with a request and an ask from one sender, the reply answers only the ask and settle only the request", async () => {
+	const { a, b } = await pair();
+	await a.mailbox(`${b.id} a request`);
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "an ask" });
+	await until(() => b.sent.length === 2, "both to be injected");
+	const sent = envelopes(a.id, "sent");
+	const request = sent.find((e) => e.kind === "request");
+	const ask = sent.find((e) => e.kind === "ask");
+	await b.agentStart();
+	await b.toolCall("session_mail_reply", { ask: ask.id, message: "the ask's answer" });
+	assert.equal((await asked).content[0].text.endsWith("the ask's answer"), true);
+	await b.agentEnd("the run's answer");
+	await b.settle();
+	const answers = envelopes(a.id, "new").concat(envelopes(a.id, "cur"));
+	assert.deepEqual(
+		answers.map((e) => [e.in_reply_to, e.body]).sort((x, y) => String(x[1]).localeCompare(String(y[1]))),
+		[
+			[[ask.id], "the ask's answer"],
+			[[request.id], "the run's answer"],
+		],
+	);
+	await a.shutdown();
+	await b.shutdown();
+});
+
+test("session_mail_reply refuses a second reply, a request, a message, an unknown id and an empty text, sending nothing", async () => {
+	const { a, b } = await pair();
+	await a.mailbox(`${b.id} a request`);
+	await a.toolCall("session_mail_send", { to: "bravo", message: "a message" });
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "an ask" });
+	await until(() => b.sent.length === 3, "all three to be injected");
+	const sent = envelopes(a.id, "sent");
+	const id = (kind: string) => sent.find((e) => e.kind === kind).id;
+	await b.agentStart();
+	await assert.rejects(b.toolCall("session_mail_reply", { ask: id("ask"), message: " " }), /the answer is empty/);
+	await b.toolCall("session_mail_reply", { ask: id("ask"), message: "once" });
+	await asked;
+	const count = () => envelopes(a.id, "new").length + envelopes(a.id, "cur").length;
+	assert.equal(count(), 1);
+	await assert.rejects(b.toolCall("session_mail_reply", { ask: id("ask"), message: "twice" }), /is already answered; nothing was sent/);
+	await assert.rejects(
+		b.toolCall("session_mail_reply", { ask: id("request"), message: "x" }),
+		/is a request, not an ask; nothing was sent\. A request is answered automatically when this run settles/,
+	);
+	await assert.rejects(
+		b.toolCall("session_mail_reply", { ask: id("message"), message: "x" }),
+		/is a message, not an ask; nothing was sent\. A message expects no answer/,
+	);
+	await assert.rejects(b.toolCall("session_mail_reply", { ask: "no-such-id", message: "x" }), /no mail with id "no-such-id" reached this session/);
+	assert.equal(count(), 1);
+	await a.shutdown();
+	await b.shutdown();
+});
+
+test("an ask answered at settle cannot be answered again by session_mail_reply", async () => {
+	const { a, b } = await pair();
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "q" });
+	await until(() => b.sent.length === 1, "the ask to be injected");
+	const [ask] = envelopes(a.id, "sent");
+	await b.answer("at settle");
+	await asked;
+	await assert.rejects(b.toolCall("session_mail_reply", { ask: ask.id, message: "late" }), /is already answered/);
 	await a.shutdown();
 	await b.shutdown();
 });
