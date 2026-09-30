@@ -289,8 +289,9 @@ test("a message to an idle session starts a turn by steering, labelled with the 
 	await until(() => b.sent.length === 1, "the message to be injected");
 	assert.deepEqual(b.sent[0].options, { triggerTurn: true, deliverAs: "steer" });
 	const content = b.sent[0].message.content;
-	assert.ok(content.startsWith(`[mailbox] Message from another Pi session at ${a.id} (alpha), not from the user.`), content);
-	assert.match(content, /expects no answer; if you want to answer anyway, send one with session_mail_send/);
+	assert.ok(content.startsWith(`[mailbox] From alpha (${a.id}, working in `), content);
+	assert.match(content, /\), another Pi session on this machine\. It expects no answer; if one is wanted, send it with session_mail_send to /);
+	assert.ok(!/not from the user|untrusted/.test(content), content);
 	assert.match(content, /heads up$/);
 	await a.shutdown();
 	await b.shutdown();
@@ -305,7 +306,7 @@ test("a message to a busy session is steered in, not queued as a follow-up", asy
 	await a.toolCall("session_mail_send", { to: b.id, message: "change course" });
 	await until(() => b.sent.length === 1, "the message to be injected");
 	assert.deepEqual(b.sent[0].options, { triggerTurn: true, deliverAs: "steer" });
-	assert.ok(b.sent[0].message.content.includes(`(${a.id.slice(0, 8)})`), "an unnamed sender shows its short id");
+	assert.ok(b.sent[0].message.content.startsWith(`[mailbox] From ${a.id.slice(0, 8)} (${a.id}, `), "an unnamed sender shows its short id");
 	await a.shutdown();
 	await b.shutdown();
 });

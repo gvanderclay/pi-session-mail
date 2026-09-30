@@ -73,12 +73,17 @@ the user has input queued. A reply starts no turn: it is shown in an idle
 session and the model sees it with the next message, unless a
 `message:inbound` listener takes it over, as `delegate` does for its tasks.
 
-Every injected message opens with a label saying it comes from another Pi
-session at its full id, followed by its name (or short id), and not from the
-user. A message's label also says it expects no answer and that
-`session_mail_send` is how to answer anyway. A reply's label names the
-requests it answers and, when its status is not `done`, says it is not an
-answer.
+Every injected message opens with a neutral label in the style of
+`pi-intercom`: `[mailbox] From <name> (<full id>, working in <cwd>), another
+Pi session on this machine.`, with the short id standing in for a missing
+name and the working directory left out when the sender is not running. It
+carries no distrust wording; with a "not from the user" warning, models
+refused every request from a peer as a possible injection. Safety stays
+outside the model: an owner-only mail root on one machine. A request's label
+says the final answer this turn goes back automatically. A message's label
+says it expects no answer and that, if one is wanted, `session_mail_send` to
+the sender's full id sends it. A reply's label names the requests it answers
+and, when its status is not `done`, says it is not an answer.
 
 Mail counts as read when it enters the conversation (`message_end`). A
 request an abort dropped before that is answered `failed`.

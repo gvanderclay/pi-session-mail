@@ -60,7 +60,7 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): void {
 			"Send a message to another Pi session on this machine. A running recipient that is idle starts a turn on it; a busy one reads it at its next gap between tool calls. The message expects no answer and nothing is sent back automatically; the recipient answers, if at all, with its own session_mail_send. `to` is a running session's name, an id prefix of at least 8 characters, or a full session id; a closed session is reached only by its full id, and the message waits in its inbox until it starts. session_mail_list shows who is running.",
 		parameters: Type.Object({
 			to: Type.String({ description: "The recipient: a running session's name, an id prefix of 8+ characters, or a full session id." }),
-			message: Type.String({ description: "The message text. The recipient sees it labelled as coming from this session, not from its user." }),
+			message: Type.String({ description: "The message text. The recipient sees it labelled as coming from this session." }),
 		}),
 		async execute(
 			_toolCallId: string,

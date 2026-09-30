@@ -115,8 +115,9 @@ test("a running session claims a message into cur/ and injects it once as labell
 		assert.deepEqual(options, { triggerTurn: true, deliverAs: "steer" });
 		assert.equal(message.customType, "mailbox");
 		assert.equal(message.display, true);
-		assert.match(message.content, new RegExp(`another Pi session at ${a.id}`));
-		assert.match(message.content, /not from the user/);
+		assert.match(message.content, new RegExp(`^\\[mailbox\\] From \\S+ \\(${a.id}, working in [^)]+\\), another Pi session on this machine\\.`));
+		assert.match(message.content, /final answer this turn goes back to it automatically/);
+		assert.ok(!/not from the user|untrusted|injection/.test(message.content), message.content);
 		assert.match(message.content, /what is 2 \+ 2\?$/);
 		assert.deepEqual(files(b.id, "new"), []);
 		assert.equal(files(b.id, "cur").length, 1);
@@ -291,7 +292,7 @@ test("a request is answered once the recipient settles, not at agent_end, and th
 	await a.shutdown();
 	await b.shutdown();
 	assert.equal(a.sent.length, 1);
-	assert.match(a.sent[0].message.content, new RegExp(`another Pi session at ${b.id}`));
+	assert.match(a.sent[0].message.content, new RegExp(`^\\[mailbox\\] From \\S+ \\(${b.id}[,)]`));
 	assert.match(a.sent[0].message.content, new RegExp(`reply to your request ${request.id}`));
 	assert.match(a.sent[0].message.content, /It is 4\.$/);
 });

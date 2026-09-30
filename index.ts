@@ -99,20 +99,24 @@ function requestQuotes(me: string, ids: readonly string[]): { requests: SentCopy
 	return { requests, quotes };
 }
 
-/** The sender as a label names it: its session name, or its short id when it has none or is not running. */
-function senderLabel(address: string): string {
-	return label(listRunning().find((record) => record.address === address) ?? { address });
+/**
+ * The sender's line, in the neutral style of `pi-intercom`'s `**From <name>** (<cwd>)`:
+ * its session name (or short id), full id and, while it runs, its working
+ * directory. No distrust wording: with it, models refused every peer request
+ * as a possible injection (spec Q37). Safety lives outside the model.
+ */
+function senderLine(address: string): string {
+	const record = listRunning().find((r) => r.address === address);
+	const where = record === undefined ? "" : `, working in ${record.cwd}`;
+	return `[mailbox] From ${label(record ?? { address })} (${address}${where}), another Pi session on this machine.`;
 }
 
-/** The injected message: who it is from, what kind it is, the requests it answers, then its capped body. */
+/** The injected message: who it is from, how to answer it, the requests it answers, then its capped body. */
 function inboundText(envelope: Envelope, path: string, quotes: readonly string[]): string {
-	const header = [
-		`[mailbox] Message from another Pi session at ${envelope.from} (${senderLabel(envelope.from)}), not from the user.`,
-	];
+	const header = [senderLine(envelope.from)];
+	if (envelope.kind === "request") header.push("Your final answer this turn goes back to it automatically.");
 	if (envelope.kind === "message")
-		header.push(
-			"It expects no answer; if you want to answer anyway, send one with session_mail_send to that address.",
-		);
+		header.push(`It expects no answer; if one is wanted, send it with session_mail_send to ${envelope.from}.`);
 	if (envelope.in_reply_to.length > 0)
 		header.push(`It is a reply to your request${envelope.in_reply_to.length > 1 ? "s" : ""} ${envelope.in_reply_to.join(", ")}.`);
 	if (envelope.in_reply_to.length > 0 && envelope.status !== "done")
