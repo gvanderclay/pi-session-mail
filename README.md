@@ -4,8 +4,12 @@ A file mailbox between Pi sessions on the same machine. The npm package is
 `pi-session-mail`.
 
 Every session has an address — its session id — and an inbox under
-`<agent dir>/mailbox/<address>/{tmp,new,cur,sent}/`. `/mailbox` shows this
-session's address, and `/mailbox <address> <text>` sends a request. Mail waits
+`<mail root>/<address>/{tmp,new,cur,sent}/`. The mail root is
+`$XDG_STATE_HOME/pi-session-mail/`, or `~/.local/state/pi-session-mail/` when
+`XDG_STATE_HOME` is unset or not an absolute path. It is created owner-only
+(mode `0700`) and shared by every Pi route on the machine, so sessions in
+different agent directories reach each other. `/mailbox` shows this session's
+address, and `/mailbox <address> <text>` sends a request. Mail waits
 on disk until a session with that address starts or resumes; a running session
 claims it into `cur/` and injects it once as a follow-up labelled as coming
 from another Pi session, with the body cut at 32 KiB plus the envelope's path.
@@ -20,6 +24,18 @@ the user stopped the run, with the partial text. A request the session was
 stopped before reading gets a `failed` reply instead. Replies are never
 answered. The footer shows `✉ N pending · N read · N awaiting`, non-zero
 counts only.
+
+## Envelopes
+
+Every envelope is a JSON file with `id`, `from`, `to`, `kind`, `hops`,
+`in_reply_to`, `status`, `ts` and `body`. `kind` is `request` (answered when
+the recipient settles), `reply` (an answer, naming what it answers in
+`in_reply_to`), `message` (plain mail that expects no answer), or `ask`,
+which is reserved: nothing in `mailbox` writes it yet. `hops` is a non-negative integer counting how many times a
+chain of mail has woken or steered a session with no person typing; for now
+every envelope carries 0. An envelope written before `kind` and `hops` existed
+is read as a reply when `in_reply_to` is non-empty and as a request
+otherwise, with hops 0.
 
 Other extensions integrate through the `pi.events` hooks below. They never
 import this package or read its files.
@@ -43,15 +59,20 @@ in the npm tarball.
 ## Requirements
 
 - Pi, with `pi.events`, `pi.sendMessage`, `pi.on` and `pi.registerCommand`.
-- `@earendil-works/pi-coding-agent` for `getAgentDir()`, declared as a peer
-  dependency and supplied by Pi.
-- A writable agent directory. The mailbox lives under `<agent dir>/mailbox/`
-  and is safe to delete while no session is running.
+- `@earendil-works/pi-coding-agent` for the extension types and the test
+  harness's event bus, declared as a peer dependency and supplied by Pi.
+- A writable state directory. The mail root lives under
+  `$XDG_STATE_HOME/pi-session-mail/` (see above) and is safe to delete while
+  no session is running.
 
 ## Configuration
 
-None. `mailbox` reads no settings file and no environment variable of its
-own, and it names no model.
+`mailbox` reads no settings file and names no model. It sets no environment
+variable of its own and reads one standard one:
+
+| Variable | Effect |
+| --- | --- |
+| `XDG_STATE_HOME` | The mail root is `$XDG_STATE_HOME/pi-session-mail/` when this is an absolute path, and `~/.local/state/pi-session-mail/` otherwise. Read at every call. |
 
 ## Statuses
 
@@ -81,8 +102,9 @@ runs that block.
 
 ### `message:send`
 
-The consumer emits `{ to, body }`. A provider writes a request from its own
-session's address and sets `envelope` on the same object before `emit`
+The consumer emits `{ to, body }`. Consumers send on the user's behalf: a
+command the user typed, or a tool whose call the user started. A provider
+writes a request (`kind: "request"`, `hops: 0`) from its own session's address and sets `envelope` on the same object before `emit`
 returns, or sets `error` instead. **If neither is set, no provider is
 installed**, and the consumer should refuse rather than pretend the message
 was sent.
@@ -91,7 +113,7 @@ was sent.
 | --- | --- | --- |
 | `to` | consumer | the recipient's address: a session id |
 | `body` | consumer | the message text |
-| `envelope` | provider | the written request: `id`, `from`, `to`, `in_reply_to`, `status`, `ts`, `body` |
+| `envelope` | provider | the written request: `id`, `from`, `to`, `kind` (`"request"`), `hops` (`0`), `in_reply_to`, `status`, `ts`, `body` |
 | `error` | provider | why nothing was written: no active session, or an invalid `to` or `body` |
 
 The request's `id` is what a reply names in its `in_reply_to`, so a consumer
@@ -105,6 +127,8 @@ pi.events.emit("message:send", payload);
 assert.equal(payload.error, undefined);
 assert.ok(payload.envelope, "a provider sets `envelope` before `emit` returns");
 assert.equal(typeof payload.envelope.id, "string");
+assert.equal(payload.envelope.kind, "request");
+assert.equal(payload.envelope.hops, 0);
 ```
 
 ```js no-provider
@@ -129,7 +153,7 @@ the claim can then run before the listener's handler. The watcher and the poll t
 
 | Field | Meaning |
 | --- | --- |
-| `envelope` | the claimed envelope, with `from`, `in_reply_to`, `status`, `body` and the rest |
+| `envelope` | the claimed envelope, with `from`, `kind`, `hops`, `in_reply_to`, `status`, `body` and the rest; an old envelope without `kind` or `hops` gets them filled in as described above |
 | `path` | the envelope's path in this session's `cur/` |
 | `requests` | a reply's `in_reply_to` requests found in this session's `sent/`, each as `{ envelope, path }`; empty for a request, and shorter than `in_reply_to` when a copy is missing |
 | `handled` | set to `true` by a listener that shows the message itself; `mailbox` then injects nothing |

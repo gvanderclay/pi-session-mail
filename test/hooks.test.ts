@@ -17,9 +17,10 @@ import register from "../index.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "mailbox-hooks-"));
 process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
+process.env.XDG_STATE_HOME = join(dir, "state");
 test.after(() => rmSync(dir, { recursive: true, force: true }));
 
-const root = join(dir, "agent", "mailbox");
+const root = join(dir, "state", "pi-session-mail");
 const files = (address: string, sub: "new" | "sent") => {
 	try {
 		return readdirSync(join(root, address, sub)).sort();
@@ -121,6 +122,8 @@ test("the README's message:send example writes a request the sender keeps a copy
 		assert.equal(envelope.from, a.id);
 		assert.equal(envelope.to, b.id);
 		assert.equal(envelope.body, "Please run the test suite.");
+		assert.equal(envelope.kind, "request");
+		assert.equal(envelope.hops, 0);
 		assert.deepEqual(envelopes(a.id, "sent"), [envelope]);
 	} finally {
 		await a.shutdown();

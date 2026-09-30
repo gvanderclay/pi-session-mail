@@ -4,7 +4,7 @@
 // `pi.events` traffic, statuses and notifications.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,9 +14,10 @@ import register from "../index.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "mailbox-test-"));
 process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
+process.env.XDG_STATE_HOME = join(dir, "state");
 test.after(() => rmSync(dir, { recursive: true, force: true }));
 
-const root = join(dir, "agent", "mailbox");
+const root = join(dir, "state", "pi-session-mail");
 const box = (address: string, sub: "tmp" | "new" | "cur" | "sent") => join(root, address, sub);
 const files = (address: string, sub: "tmp" | "new" | "cur" | "sent") =>
 	existsSync(box(address, sub)) ? readdirSync(box(address, sub)).sort() : [];
@@ -151,12 +152,49 @@ test("/mailbox <address> <text> writes a request to the recipient's new/ and the
 	assert.equal(env.from, a.id);
 	assert.equal(env.to, b);
 	assert.deepEqual(env.in_reply_to, []);
+	assert.equal(env.kind, "request");
+	assert.equal(env.hops, 0);
+	assert.equal(env.status, "");
 	assert.equal(env.body, "hello there");
 	assert.match(env.id, /^[0-9a-f-]{36}$/);
 	assert.ok(!Number.isNaN(Date.parse(env.ts)));
 	assert.ok(files(b, "new")[0].endsWith(`${env.id}.json`));
 	assert.deepEqual(envelopes(a.id, "sent"), [env]);
 	assert.deepEqual(a.errors, []);
+});
+
+test("mail lands under $XDG_STATE_HOME/pi-session-mail/<address>/, a root created owner-only, and nothing under the agent dir", async () => {
+	const a = session(newId("a"));
+	const b = newId("b");
+	await a.mailbox(`${b} hello`);
+	assert.equal(readdirSync(join(dir, "state", "pi-session-mail", b, "new")).length, 1);
+	assert.equal(statSync(root).mode & 0o777, 0o700);
+	for (const sub of ["tmp", "new", "cur", "sent"]) assert.equal(statSync(box(b, sub as "new")).mode & 0o777, 0o700);
+	assert.ok(!existsSync(join(dir, "agent", "mailbox")));
+});
+
+test("the root is read at call time and ignores a relative XDG_STATE_HOME", async () => {
+	const saved = process.env.XDG_STATE_HOME;
+	const other = join(dir, "other-state");
+	const home = process.env.HOME;
+	const fakeHome = join(dir, "home");
+	try {
+		process.env.XDG_STATE_HOME = other;
+		const a = session(newId("a"));
+		const b = newId("b");
+		await a.mailbox(`${b} moved`);
+		assert.equal(readdirSync(join(other, "pi-session-mail", b, "new")).length, 1);
+
+		process.env.XDG_STATE_HOME = "relative/state";
+		process.env.HOME = fakeHome;
+		const c = newId("c");
+		await a.mailbox(`${c} fallback`);
+		assert.equal(readdirSync(join(fakeHome, ".local", "state", "pi-session-mail", c, "new")).length, 1);
+		assert.ok(!existsSync(join("relative", "state")));
+	} finally {
+		process.env.XDG_STATE_HOME = saved;
+		process.env.HOME = home;
+	}
 });
 
 test("file names sort in send order", async () => {
@@ -361,6 +399,8 @@ test("a request is answered once the recipient settles, not at agent_end, and th
 	assert.equal(reply.from, b.id);
 	assert.equal(reply.to, a.id);
 	assert.equal(reply.status, "done");
+	assert.equal(reply.kind, "reply");
+	assert.equal(reply.hops, 0);
 	assert.deepEqual(reply.in_reply_to, [request.id]);
 	assert.equal(reply.body, "It is 4.");
 	assert.equal(files(b.id, "sent").length, 0);
@@ -419,6 +459,49 @@ test("replies are never answered, and a settle with nothing pending sends nothin
 	assert.deepEqual(files(b.id, "new"), []);
 	assert.equal(files(a.id, "cur").length, 1);
 	assert.equal(files(a.id, "new").length, 0);
+});
+
+test("an envelope written before kind and hops is read as a request or a reply by in_reply_to, with hops 0", async () => {
+	type Inbound = { envelope: { kind: string; hops: number; in_reply_to: string[] } };
+	const b = session(newId("b"));
+	const seen: Inbound[] = [];
+	b.events.on("message:inbound", (p) => void seen.push(p as Inbound));
+	const a = newId("a");
+	mkdirSync(box(b.id, "new"), { recursive: true });
+	const old = (id: string, inReplyTo: string[]) =>
+		JSON.stringify({ id, from: a, to: b.id, in_reply_to: inReplyTo, status: inReplyTo.length > 0 ? "done" : "", ts: "", body: "old" });
+	writeFileSync(join(box(b.id, "new"), "000000000000001-old-request.json"), old("old-request", []));
+	writeFileSync(join(box(b.id, "new"), "000000000000002-old-reply.json"), old("old-reply", ["some-request"]));
+	await b.start();
+	await b.answer("answered");
+	await b.shutdown();
+	assert.deepEqual(
+		seen.map((p) => [p.envelope.kind, p.envelope.hops]),
+		[
+			["request", 0],
+			["reply", 0],
+		],
+	);
+	const [reply] = envelopes(a, "new");
+	assert.deepEqual(reply.in_reply_to, ["old-request"]);
+	assert.equal(reply.kind, "reply");
+	assert.deepEqual(b.warnings, []);
+});
+
+test("an envelope with an unknown kind or a bad hop count is set aside with a warning", async () => {
+	const b = session(newId("b"));
+	const a = newId("a");
+	mkdirSync(box(b.id, "new"), { recursive: true });
+	const bad = (id: string, extra: object) =>
+		JSON.stringify({ id, from: a, to: b.id, in_reply_to: [], status: "", ts: "", body: "x", ...extra });
+	writeFileSync(join(box(b.id, "new"), "000000000000001-k.json"), bad("k", { kind: "shout", hops: 0 }));
+	writeFileSync(join(box(b.id, "new"), "000000000000002-h.json"), bad("h", { kind: "request", hops: -1 }));
+	await b.start();
+	await b.shutdown();
+	assert.equal(b.sent.length, 0);
+	assert.equal(b.warnings.length, 2);
+	assert.match(b.warnings[0], /invalid kind "shout"/);
+	assert.match(b.warnings[1], /invalid hops -1/);
 });
 
 test("an envelope with an invalid from gets no reply", async () => {

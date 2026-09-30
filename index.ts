@@ -1,20 +1,24 @@
 // `mailbox`: a file mailbox between Pi sessions on this machine.
 //
 // Every session has an address (its session id) and an inbox under
-// `<agent dir>/mailbox/<address>/`. `/mailbox` shows the address and
-// `/mailbox <address> <text>` sends a request. Mail in the inbox is claimed
-// into `cur/` and injected as a follow-up that names the sending session; a
-// reply quotes each request it answers from this session's `sent/` copy and,
-// unlike a request, does not start a turn. When the recipient settles, its
+// `<mail root>/<address>/`, where the mail root
+// (`$XDG_STATE_HOME/pi-session-mail/`, or `~/.local/state/pi-session-mail/`)
+// is shared by every route, so sessions in different routes reach each other.
+// `/mailbox` shows the address and `/mailbox <address> <text>` sends a
+// request. Mail in the inbox is claimed into `cur/` and injected as a
+// follow-up that names the sending session; a reply quotes each request it
+// answers from this session's `sent/` copy and, unlike a request, does not
+// start a turn. When the recipient settles, its
 // last answer goes back to each sender as one reply — `done` normally, or
 // `stopped` when the user stopped the run, with any partial text. Requests
 // that never entered the conversation (an abort drops queued follow-ups) get
 // a `failed` reply instead. Replies are never answered. Other extensions use
 // `pi.events` (below).
 //
-// Specs: .scratch/pi-mailbox/spec.md (the mailbox itself) and
+// Specs: .scratch/pi-mailbox/spec.md (the mailbox itself),
 // .scratch/pi-delegate/spec.md (the `message:*` hooks and this package's
-// shape). The hook contracts live in this package's README.
+// shape) and .scratch/pi-conversations/spec.md (the shared root, kinds, hops).
+// The hook contracts live in this package's README.
 import { type FSWatcher, watch } from "node:fs";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -244,7 +248,8 @@ export default function mailbox(pi: ExtensionAPI) {
 		try {
 			if (address === undefined) throw new Error("no active session has a mailbox address");
 			if (typeof payload.body !== "string") throw new Error("body must be a string");
-			payload.envelope = send(address, payload.to as string, payload.body);
+			// A `message:send` caller acts for the user, so its request starts a fresh chain.
+			payload.envelope = send(address, payload.to as string, payload.body, { kind: "request", hops: 0 });
 			updateStatus();
 		} catch (err) {
 			payload.error = (err as Error).message;
@@ -326,8 +331,9 @@ export default function mailbox(pi: ExtensionAPI) {
 			const done = ids.filter((id) => read.has(id));
 			const failed = ids.filter((id) => !read.has(id));
 			try {
-				if (done.length > 0) send(me, to, body, done, status);
-				if (failed.length > 0) send(me, to, UNSEEN, failed, "failed");
+				// Answers carry hops 0 until the hop count exists (pi-conversations ticket 04).
+				if (done.length > 0) send(me, to, body, { kind: "reply", hops: 0, inReplyTo: done, status });
+				if (failed.length > 0) send(me, to, UNSEEN, { kind: "reply", hops: 0, inReplyTo: failed, status: "failed" });
 			} catch (err) {
 				warn(`could not reply to ${to}: ${(err as Error).message}`);
 			}
@@ -355,7 +361,7 @@ export default function mailbox(pi: ExtensionAPI) {
 				return;
 			}
 			try {
-				const envelope = send(me, match[1], match[2].trim());
+				const envelope = send(me, match[1], match[2].trim(), { kind: "request", hops: 0 });
 				context.ui.notify(`Sent ${envelope.id} to ${envelope.to}`, "info");
 				updateStatus();
 			} catch (err) {
