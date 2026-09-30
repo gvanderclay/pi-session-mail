@@ -187,6 +187,14 @@ export default function mailbox(pi: ExtensionAPI) {
 	let lastAborted = false;
 	/** Messages injected since the last settle, for the status's pending count. */
 	let injected = 0;
+	/**
+	 * The hop count of the current turn: 0 once the user starts or steers it,
+	 * otherwise the highest `hops` + 1 among the envelopes that started or
+	 * steered into it. Mail sent from the turn carries it.
+	 */
+	let hops = 0;
+	/** Whether this session has already warned about a broken `session-mail.json`. */
+	let configWarned = false;
 	/** What this session's running-session record says. */
 	let name: string | undefined;
 	let cwd = "";
@@ -249,6 +257,9 @@ export default function mailbox(pi: ExtensionAPI) {
 		// Only requests arm an answer: replies are never answered, and messages
 		// expect none. A request arms one even when a listener took over its display.
 		if (envelope.kind === "request") owed.set(envelope.from, [...(owed.get(envelope.from) ?? []), envelope.id]);
+		// Mail that wakes or steers the session raises its count; a reply shown
+		// quietly starts no turn, but one a listener took over may.
+		if (envelope.kind !== "reply" || inbound.handled) hops = Math.max(hops, envelope.hops + 1);
 		// `mailbox` cannot observe a listener's own message, so a takeover counts as seen.
 		if (inbound.handled) {
 			seen.add(envelope.id);
@@ -309,6 +320,8 @@ export default function mailbox(pi: ExtensionAPI) {
 		lastAnswer = undefined;
 		lastAborted = false;
 		injected = 0;
+		hops = 0;
+		configWarned = false;
 		const id = context.sessionManager.getSessionId();
 		if (!isAddress(id)) {
 			address = undefined;
@@ -351,6 +364,12 @@ export default function mailbox(pi: ExtensionAPI) {
 		if (typeof message.details?.id === "string") seen.add(message.details.id);
 	});
 
+	// Typed text, RPC input and a prompt a command sends all come from the
+	// user, so each starts the chain again.
+	pi.on("input", async () => {
+		hops = 0;
+	});
+
 	pi.on("session_info_changed", async (event) => {
 		name = event.name || undefined;
 		announce();
@@ -378,6 +397,9 @@ export default function mailbox(pi: ExtensionAPI) {
 				: `${STOPPED}\n\n${lastAnswer}`
 			: (lastAnswer ?? NO_ANSWER);
 		const status = lastAborted ? "stopped" : "done";
+		// Answers carry the settled turn's count; the next turn counts afresh.
+		const answerHops = hops;
+		hops = 0;
 		const replies = owed;
 		const read = seen;
 		owed = new Map();
@@ -392,9 +414,10 @@ export default function mailbox(pi: ExtensionAPI) {
 			const done = ids.filter((id) => read.has(id));
 			const failed = ids.filter((id) => !read.has(id));
 			try {
-				// Answers carry hops 0 until the hop count exists (pi-conversations ticket 04).
-				if (done.length > 0) send(me, to, body, { kind: "reply", hops: 0, inReplyTo: done, status });
-				if (failed.length > 0) send(me, to, UNSEEN, { kind: "reply", hops: 0, inReplyTo: failed, status: "failed" });
+				// Answers are never refused by the hop limit.
+				if (done.length > 0) send(me, to, body, { kind: "reply", hops: answerHops, inReplyTo: done, status });
+				if (failed.length > 0)
+					send(me, to, UNSEEN, { kind: "reply", hops: answerHops, inReplyTo: failed, status: "failed" });
 			} catch (err) {
 				warn(`could not reply to ${to}: ${(err as Error).message}`);
 			}
@@ -414,7 +437,15 @@ export default function mailbox(pi: ExtensionAPI) {
 		address = undefined;
 	});
 
-	registerTools(pi, { sent: () => updateStatus() });
+	registerTools(pi, {
+		sent: () => updateStatus(),
+		hops: () => hops,
+		configProblem: (message) => {
+			if (configWarned) return;
+			configWarned = true;
+			warn(message);
+		},
+	});
 
 	pi.registerCommand("mailbox", {
 		description: "Show this session's mailbox address and name, or send a request: /mailbox <name or id> <text>",

@@ -41,7 +41,7 @@ The model gets these tools:
 | Tool | Parameters | What it does |
 | --- | --- | --- |
 | `session_mail_list` | none | Lists every running session, in every route: its name (or short id, the first 8 characters of its id, when it has no name), full id, working directory, idle or busy state and whom it is waiting on, and marks the calling session. |
-| `session_mail_send` | `to`, `message` | Writes a message (`kind: "message"`) and returns its id. To a running session it is delivered at once; to a closed session, by full id, it waits in that session's inbox and the result says so. Refused when `to` does not resolve, is ambiguous or is this session, and when the text is empty. |
+| `session_mail_send` | `to`, `message` | Writes a message (`kind: "message"`) and returns its id. To a running session it is delivered at once; to a closed session, by full id, it waits in that session's inbox and the result says so. Refused when `to` does not resolve, is ambiguous or is this session, when the text is empty, and at the [hop limit](#hop-limit). |
 
 ## Addressing
 
@@ -95,10 +95,29 @@ Every envelope is a JSON file with `id`, `from`, `to`, `kind`, `hops`,
 the recipient settles), `reply` (an answer, naming what it answers in
 `in_reply_to`), `message` (plain mail that expects no answer), or `ask`,
 which is reserved: nothing in `mailbox` writes it yet. `hops` is a non-negative integer counting how many times a
-chain of mail has woken or steered a session with no person typing; for now
-every envelope carries 0. An envelope written before `kind` and `hops` existed
+chain of mail has woken or steered a session with no person typing (see
+[Hop limit](#hop-limit)). An envelope written before `kind` and `hops` existed
 is read as a reply when `in_reply_to` is non-empty and as a request
 otherwise, with hops 0.
+
+## Hop limit
+
+Each session keeps a hop count for its current turn. It is 0 once the user
+starts or steers the turn: any Pi `input` event, whether typed, sent over RPC,
+or a prompt a command sent. Otherwise it is the highest `hops` plus one among
+the envelopes that started the turn or steered into it, requests and messages
+alike, and a reply a `message:inbound` listener took over. A reply shown
+quietly starts no turn and does not count. The count starts afresh when the
+run settles.
+
+`session_mail_send` stamps the count on its message, and is refused before
+anything is written once the count has reached the limit (5 unless
+`session-mail.json` says otherwise; see [Configuration](#configuration)). The
+refusal says that a person typing in either session starts the count again.
+Automatic answers carry the count and are never refused. Requests from
+`/mailbox` and `message:send` carry 0 and are never refused: their senders act
+for the user. The limit is a loop guard, not a security boundary: a
+hand-written envelope can claim any `hops`.
 
 Other extensions integrate through the `pi.events` hooks below. They never
 import this package or read its files.
@@ -125,16 +144,30 @@ in the npm tarball.
   `pi.registerTool`.
 - `typebox` for the tools' parameter schemas, a host-provided package
   declared as a peer dependency and supplied by Pi.
-- `@earendil-works/pi-coding-agent` for the extension types and the test
-  harness's event bus, declared as a peer dependency and supplied by Pi.
+- `@earendil-works/pi-coding-agent` for the extension types, `getAgentDir`
+  (to find `session-mail.json`) and the test harness's event bus, declared as a peer dependency and supplied by Pi.
 - A writable state directory. The mail root lives under
   `$XDG_STATE_HOME/pi-session-mail/` (see above) and is safe to delete while
   no session is running.
 
 ## Configuration
 
-`mailbox` reads no settings file and names no model. It sets no environment
-variable of its own and reads one standard one:
+`mailbox` names no model. It reads one optional settings file,
+`<agent dir>/session-mail.json`, where the agent dir is Pi's
+(`PI_CODING_AGENT_DIR`, or `~/.pi/agent`), so each route sets its own:
+
+```json
+{ "hopLimit": 5 }
+```
+
+| Key | Effect |
+| --- | --- |
+| `hopLimit` | A positive integer: how many hops a chain of sessions waking each other may reach before `session_mail_send` is refused. Default 5. |
+
+The file is read at each send. A missing file, or one without `hopLimit`,
+means 5. An unreadable or invalid file also means 5, with one warning per
+session. `mailbox` sets no environment variable of its own and reads one
+standard one:
 
 | Variable | Effect |
 | --- | --- |

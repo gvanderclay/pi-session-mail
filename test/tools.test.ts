@@ -5,7 +5,7 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { dir, envelopes, files, newId, records, session, stateRoot, until } from "./harness.ts";
@@ -357,3 +357,204 @@ test("session_mail_send refuses an empty text, an unknown or ambiguous to, and t
 	assert.deepEqual(files(b.id, "new"), []);
 	await Promise.all([a.shutdown(), b.shutdown(), c.shutdown()]);
 });
+
+// ---------------------------------------------------------------------------
+// Hop limit (pi-conversations ticket 04)
+
+let planted = 0;
+/** An envelope written by hand into `to`'s new/, as a session at hop count `hops` would send it. */
+function plant(to: string, from: string, hops: number, kind = "message") {
+	mkdirSync(join(stateRoot(), to, "new"), { recursive: true });
+	const id = `planted-${++planted}`;
+	const name = `${String(planted).padStart(15, "0")}-${id}.json`;
+	writeFileSync(
+		join(stateRoot(), to, "new", name),
+		JSON.stringify({ id, from, to, kind, hops, in_reply_to: [], status: "", ts: "", body: `at hop ${hops}` }),
+	);
+	return id;
+}
+
+/** The hops `session_mail_send` stamps when `s` sends now. */
+async function stampedHops(s: ReturnType<typeof session>, to: string): Promise<number> {
+	const result = await s.toolCall("session_mail_send", { to, message: "next" });
+	const id = (result.details as { id: string }).id;
+	return envelopes(to, "new").concat(envelopes(to, "cur")).find((e) => e.id === id).hops;
+}
+
+test("a message raises the recipient's count to its hops + 1, which its next send stamps", async () => {
+	const b = session(newId());
+	await b.start();
+	await b.agentStart();
+	plant(b.id, newId(), 2);
+	await until(() => b.sent.length === 1, "the message to be injected");
+	assert.equal(await stampedHops(b, newId()), 3);
+	await b.shutdown();
+});
+
+test("anything the user types resets the count to 0, even mid-turn", async () => {
+	const b = session(newId());
+	await b.start();
+	await b.agentStart();
+	plant(b.id, newId(), 3);
+	await until(() => b.sent.length === 1, "the message to be injected");
+	await b.input("over to me");
+	assert.equal(await stampedHops(b, newId()), 0);
+	await b.shutdown();
+});
+
+test("RPC input and a prompt a command sent reset the count too", async () => {
+	for (const source of ["rpc", "extension"] as const) {
+		const b = session(newId());
+		await b.start();
+		await b.agentStart();
+		plant(b.id, newId(), 3);
+		await until(() => b.sent.length === 1, "the message to be injected");
+		await b.input("from the user", source);
+		assert.equal(await stampedHops(b, newId()), 0, source);
+		await b.shutdown();
+	}
+});
+
+test("a turn started by new mail counts from that mail, not from the turn before", async () => {
+	const b = session(newId());
+	await b.start();
+	await b.agentStart();
+	plant(b.id, newId(), 3);
+	await until(() => b.sent.length === 1, "the first message");
+	await b.settle();
+	plant(b.id, newId(), 0);
+	await until(() => b.sent.length === 2, "the second message");
+	await b.agentStart();
+	assert.equal(await stampedHops(b, newId()), 1);
+	await b.shutdown();
+});
+
+test("mail steered into a turn the user started raises its count", async () => {
+	const b = session(newId());
+	await b.start();
+	await b.input("start working");
+	await b.agentStart();
+	plant(b.id, newId(), 1);
+	await until(() => b.sent.length === 1, "the message to be steered in");
+	assert.equal(await stampedHops(b, newId()), 2);
+	await b.shutdown();
+});
+
+test("a reply a message:inbound listener takes over raises the count; one shown quietly does not", async () => {
+	const b = session(newId());
+	let takeOver = false;
+	b.events.on("message:inbound", (p) => {
+		(p as { handled: boolean }).handled = takeOver;
+	});
+	await b.start();
+	await b.agentStart();
+	plant(b.id, newId(), 3, "reply");
+	await until(() => b.sent.length === 1, "the quiet reply");
+	assert.equal(await stampedHops(b, newId()), 0);
+	takeOver = true;
+	plant(b.id, newId(), 2, "reply");
+	await until(() => files(b.id, "new").length === 0, "the reply to be claimed");
+	assert.equal(await stampedHops(b, newId()), 3);
+	await b.shutdown();
+});
+
+test("a send at the limit is refused before anything is written, and says typing starts the count again", async () => {
+	const b = session(newId());
+	await b.start();
+	await b.agentStart();
+	plant(b.id, newId(), 4);
+	await until(() => b.sent.length === 1, "the message to be injected");
+	const to = newId();
+	await assert.rejects(
+		b.toolCall("session_mail_send", { to, message: "one more" }),
+		/hop limit of 5[\s\S]*a person typing in either session starts the count again/i,
+	);
+	assert.deepEqual(files(b.id, "sent"), []);
+	assert.deepEqual(files(to, "new"), []);
+	await b.shutdown();
+});
+
+test("the automatic answer to a request is sent even at the limit, carrying the count", async () => {
+	const b = session(newId());
+	const asker = newId();
+	await b.start();
+	plant(b.id, asker, 4, "request");
+	await until(() => b.sent.length === 1, "the request to be injected");
+	await b.answer("still answered");
+	const [reply] = envelopes(asker, "new");
+	assert.equal(reply.kind, "reply");
+	assert.equal(reply.hops, 5);
+	assert.equal(reply.body, "still answered");
+	await b.shutdown();
+});
+
+/** Run `body` with `text` as `<agent dir>/session-mail.json` (none when undefined), removing it after. */
+async function withConfig(text: string | undefined, body: () => Promise<void>) {
+	const agent = process.env.PI_CODING_AGENT_DIR as string;
+	const path = join(agent, "session-mail.json");
+	rmSync(path, { force: true });
+	if (text !== undefined) {
+		mkdirSync(agent, { recursive: true });
+		writeFileSync(path, text);
+	}
+	try {
+		await body();
+	} finally {
+		rmSync(path, { force: true });
+	}
+}
+
+/** A session at hop count `count`, from a planted message. */
+async function atHops(count: number) {
+	const s = session(newId());
+	await s.start();
+	await s.agentStart();
+	plant(s.id, newId(), count - 1);
+	await until(() => s.sent.length === 1, "the message to be injected");
+	return s;
+}
+
+test("session-mail.json sets the hop limit, read at each send", async () => {
+	await withConfig(JSON.stringify({ hopLimit: 2 }), async () => {
+		const s = await atHops(1);
+		await s.toolCall("session_mail_send", { to: newId(), message: "at 1" });
+		plant(s.id, newId(), 1);
+		await until(() => s.sent.length === 2, "the second message");
+		await assert.rejects(s.toolCall("session_mail_send", { to: newId(), message: "at 2" }), /hop limit of 2/);
+		writeFileSync(join(process.env.PI_CODING_AGENT_DIR as string, "session-mail.json"), JSON.stringify({ hopLimit: 3 }));
+		await s.toolCall("session_mail_send", { to: newId(), message: "at 2, limit 3" });
+		assert.deepEqual(s.warnings, []);
+		await s.shutdown();
+	});
+});
+
+test("without session-mail.json the hop limit is 5, with no warning", async () => {
+	await withConfig(undefined, async () => {
+		const s = await atHops(4);
+		await s.toolCall("session_mail_send", { to: newId(), message: "at 4" });
+		await s.shutdown();
+		const t = await atHops(5);
+		await assert.rejects(t.toolCall("session_mail_send", { to: newId(), message: "at 5" }), /hop limit of 5/);
+		assert.deepEqual([...s.warnings, ...t.warnings], []);
+		await t.shutdown();
+	});
+});
+
+for (const [what, text] of [
+	["not JSON", "{ hopLimit: 2"],
+	["a zero hopLimit", JSON.stringify({ hopLimit: 0 })],
+	["a fractional hopLimit", JSON.stringify({ hopLimit: 2.5 })],
+	["a string hopLimit", JSON.stringify({ hopLimit: "2" })],
+	["not an object", "[2]"],
+] as const) {
+	test(`a session-mail.json that is ${what} means 5, with exactly one warning across two sends`, async () => {
+		await withConfig(text, async () => {
+			const s = await atHops(4);
+			await s.toolCall("session_mail_send", { to: newId(), message: "first" });
+			await s.toolCall("session_mail_send", { to: newId(), message: "second" });
+			assert.equal(s.warnings.length, 1);
+			assert.match(s.warnings[0], /session-mail\.json[\s\S]*5/);
+			await s.shutdown();
+		});
+	});
+}

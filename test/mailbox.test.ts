@@ -284,7 +284,7 @@ test("a request is answered once the recipient settles, not at agent_end, and th
 	assert.equal(reply.to, a.id);
 	assert.equal(reply.status, "done");
 	assert.equal(reply.kind, "reply");
-	assert.equal(reply.hops, 0);
+	assert.equal(reply.hops, 1); // the request (hop 0) started this turn
 	assert.deepEqual(reply.in_reply_to, [request.id]);
 	assert.equal(reply.body, "It is 4.");
 	assert.equal(files(b.id, "sent").length, 0);

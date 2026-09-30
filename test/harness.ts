@@ -137,8 +137,8 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 		/** Run only the `session_start` handlers, to watch what happens inside them. */
 		sessionStart: (reason = "startup") => fire("session_start", { reason }),
 		shutdown: () => fire("session_shutdown"),
-		/** The user typed `text`. */
-		input: (text: string) => fire("input", { text, source: "interactive" }),
+		/** The user typed `text`, or sent it over RPC or through a command (`source`). */
+		input: (text: string, source: "interactive" | "rpc" | "extension" = "interactive") => fire("input", { text, source }),
 		/** A run starts: the session is busy until it settles. */
 		agentStart: () => {
 			idle = false;

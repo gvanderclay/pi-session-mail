@@ -3,8 +3,13 @@
 //
 // `session_mail_list` reports every running Pi session on this machine, in
 // every route, and marks the calling one. `session_mail_send` leaves a plain
-// message, which wakes or steers its recipient and expects no answer.
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+// message, which wakes or steers its recipient and expects no answer. Mail a
+// tool sends carries the turn's hop count and is refused once the count
+// reaches `hopLimit` from `<agent dir>/session-mail.json`.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import { label, listRunning, resolveTo, type RunningRecord } from "./running.ts";
@@ -14,7 +19,60 @@ import { send } from "./store.ts";
 export type ToolHooks = {
 	/** Called after a tool wrote mail, so the footer can count it. */
 	sent: () => void;
+	/** The current turn's hop count, which mail sent now carries. */
+	hops: () => number;
+	/** Report a broken `session-mail.json`; the extension shows one warning per session. */
+	configProblem: (message: string) => void;
 };
+
+/** The hop limit when `session-mail.json` is missing or broken (spec Q14). */
+const DEFAULT_HOP_LIMIT = 5;
+
+/**
+ * `hopLimit` from `<agent dir>/session-mail.json`, read at each send. A
+ * missing file, or one without `hopLimit`, means the default; an unreadable
+ * or invalid one means the default and a problem report.
+ */
+function hopLimit(hooks: ToolHooks): number {
+	const path = join(getAgentDir(), "session-mail.json");
+	let text: string;
+	try {
+		text = readFileSync(path, "utf8");
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code !== "ENOENT")
+			hooks.configProblem(`could not read ${path} (${(err as Error).message}); using the hop limit ${DEFAULT_HOP_LIMIT}`);
+		return DEFAULT_HOP_LIMIT;
+	}
+	let config: unknown;
+	try {
+		config = JSON.parse(text);
+	} catch (err) {
+		hooks.configProblem(`${path} is not valid JSON (${(err as Error).message}); using the hop limit ${DEFAULT_HOP_LIMIT}`);
+		return DEFAULT_HOP_LIMIT;
+	}
+	if (typeof config !== "object" || config === null || Array.isArray(config)) {
+		hooks.configProblem(`${path} is not a JSON object; using the hop limit ${DEFAULT_HOP_LIMIT}`);
+		return DEFAULT_HOP_LIMIT;
+	}
+	const limit = (config as { hopLimit?: unknown }).hopLimit;
+	if (limit === undefined) return DEFAULT_HOP_LIMIT;
+	if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1) {
+		hooks.configProblem(
+			`hopLimit in ${path} must be a positive integer, not ${JSON.stringify(limit)}; using ${DEFAULT_HOP_LIMIT}`,
+		);
+		return DEFAULT_HOP_LIMIT;
+	}
+	return limit;
+}
+
+/** Refuse, before anything is written, once the turn's hop count has reached the limit. */
+function checkHops(hops: number, hooks: ToolHooks): void {
+	const limit = hopLimit(hooks);
+	if (hops < limit) return;
+	throw new Error(
+		`nothing was sent: this turn is ${hops} hops into a chain of sessions waking each other with nobody typing, and the hop limit of ${limit} is reached. A person typing in either session starts the count again.`,
+	);
+}
 
 /** The one result every tool returns. */
 function toolResult(text: string, details: unknown = {}) {
@@ -73,7 +131,9 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): void {
 			const body = typeof params.message === "string" ? params.message.trim() : "";
 			if (body === "") throw new Error("the message is empty; nothing was sent");
 			const to = resolveTo(typeof params.to === "string" ? params.to : "", me);
-			const envelope = send(me, to, body, { kind: "message", hops: 0 });
+			const hops = hooks.hops();
+			checkHops(hops, hooks);
+			const envelope = send(me, to, body, { kind: "message", hops });
 			hooks.sent();
 			const target = listRunning().find((record) => record.address === to);
 			const text =
