@@ -20,10 +20,8 @@
 // a `failed` reply instead. Replies and messages are never answered. Other extensions use
 // `pi.events` (below).
 //
-// Specs: .scratch/pi-mailbox/spec.md (the mailbox itself),
-// .scratch/pi-delegate/spec.md (the `message:*` hooks and this package's
-// shape) and .scratch/pi-conversations/spec.md (the shared root, kinds, hops).
-// The hook contracts live in this package's README.
+// The original specs (.scratch/pi-mailbox, pi-delegate, pi-conversations) are
+// in git history. The hook contracts live in this package's README.
 import { type FSWatcher, watch } from "node:fs";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
