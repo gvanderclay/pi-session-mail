@@ -9,7 +9,8 @@ Every session has an address — its session id — and an inbox under
 `XDG_STATE_HOME` is unset or not an absolute path. It is created owner-only
 (mode `0700`) and shared by every Pi route on the machine, so sessions in
 different agent directories reach each other. `/mailbox` shows this session's
-address, and `/mailbox <address> <text>` sends a request. Mail waits
+address and name, and `/mailbox <to> <text>` sends a request, with `to`
+resolved as described under [Addressing](#addressing). Mail waits
 on disk until a session with that address starts or resumes; a running session
 claims it into `cur/` and injects it once as a follow-up labelled as coming
 from another Pi session, with the body cut at 32 KiB plus the envelope's path.
@@ -24,6 +25,40 @@ the user stopped the run, with the partial text. A request the session was
 stopped before reading gets a `failed` reply instead. Replies are never
 answered. The footer shows `✉ N pending · N read · N awaiting`, non-zero
 counts only.
+
+## Running sessions
+
+At session start each session writes a record to `<mail root>/running/<address>.json`
+(owner-only): its address, Pi session name (when one is set), working
+directory, process id, `idle` or `busy`, `waitingOn` (the address one of its
+pending asks waits on; always empty for now), and `updated`, when the record
+last changed. The record is rewritten when the session is renamed
+(`session_info_changed`), when a run starts (`busy`) and when it settles
+(`idle`), and removed at `session_shutdown`. A record whose process no longer
+exists counts as not running, and whoever reads it deletes it; so does a
+session left behind by a crash.
+
+The model gets one tool:
+
+| Tool | Parameters | What it does |
+| --- | --- | --- |
+| `session_mail_list` | none | Lists every running session, in every route: its name (or short id, the first 8 characters of its id, when it has no name), full id, working directory, idle or busy state and whom it is waiting on, and marks the calling session. |
+
+## Addressing
+
+A `to`, typed after `/mailbox` or given to a tool, resolves as follows:
+
+1. A running session's address, or any full session id (a UUID), resolves as
+   given, so a closed session is still reached by its full id and its mail
+   waits for it.
+2. Otherwise `to` matches running sessions by exact Pi session name, then by
+   an id prefix of at least 8 characters.
+3. One match resolves. Several are refused, naming each candidate's name and
+   full id; that includes a short id two sessions share. None is refused, with
+   a note that a closed session is reached by its full id.
+4. A session cannot send mail to itself.
+
+`message:send` does not resolve names: its `to` is an address.
 
 ## Envelopes
 
@@ -58,7 +93,10 @@ in the npm tarball.
 
 ## Requirements
 
-- Pi, with `pi.events`, `pi.sendMessage`, `pi.on` and `pi.registerCommand`.
+- Pi, with `pi.events`, `pi.sendMessage`, `pi.on`, `pi.registerCommand` and
+  `pi.registerTool`.
+- `typebox` for the tools' parameter schemas, a host-provided package
+  declared as a peer dependency and supplied by Pi.
 - `@earendil-works/pi-coding-agent` for the extension types and the test
   harness's event bus, declared as a peer dependency and supplied by Pi.
 - A writable state directory. The mail root lives under

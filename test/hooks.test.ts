@@ -72,6 +72,7 @@ function session(sessionId: string) {
 		events,
 		on: (name: string, handler: Handler) => (handlers[name] ??= []).push(handler),
 		registerCommand: () => {},
+		registerTool: () => {},
 		sendMessage: (message: Sent["message"], options: unknown) => {
 			sent.push({ message, options });
 			for (const h of handlers.message_end ?? [])

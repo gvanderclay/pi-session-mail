@@ -4,11 +4,14 @@
 // `<mail root>/<address>/`, where the mail root
 // (`$XDG_STATE_HOME/pi-session-mail/`, or `~/.local/state/pi-session-mail/`)
 // is shared by every route, so sessions in different routes reach each other.
-// `/mailbox` shows the address and `/mailbox <address> <text>` sends a
-// request. Mail in the inbox is claimed into `cur/` and injected as a
-// follow-up that names the sending session; a reply quotes each request it
-// answers from this session's `sent/` copy and, unlike a request, does not
-// start a turn. When the recipient settles, its
+// Each running session also announces its name, working directory and idle or
+// busy state in `<mail root>/running/<address>.json` (`running.ts`), which
+// `session_mail_list` reports (`tools.ts`) and which lets a `to` name a
+// session by its Pi session name or short id. `/mailbox` shows the address and
+// name, and `/mailbox <to> <text>` sends a request. Mail in the inbox is
+// claimed into `cur/` and injected as a follow-up that names the sending
+// session; a reply quotes each request it answers from this session's `sent/`
+// copy and, unlike a request, does not start a turn. When the recipient settles, its
 // last answer goes back to each sender as one reply — `done` normally, or
 // `stopped` when the user stopped the run, with any partial text. Requests
 // that never entered the conversation (an abort drops queued follow-ups) get
@@ -36,6 +39,8 @@ import {
 	send,
 	type SentCopy,
 } from "./store.ts";
+import { label, removeRecord, resolveTo, type State, writeRecord } from "./running.ts";
+import { registerTools } from "./tools.ts";
 
 const CUSTOM_TYPE = "mailbox";
 const STATUS_KEY = "mailbox";
@@ -166,6 +171,28 @@ export default function mailbox(pi: ExtensionAPI) {
 	let lastAborted = false;
 	/** Messages injected since the last settle, for the status's pending count. */
 	let injected = 0;
+	/** What this session's running-session record says. */
+	let name: string | undefined;
+	let cwd = "";
+	let state: State = "idle";
+
+	/** Write this session's running-session record from the fields above. */
+	function announce() {
+		if (address === undefined) return;
+		try {
+			writeRecord({
+				address,
+				...(name === undefined ? {} : { name }),
+				cwd,
+				pid: process.pid,
+				state,
+				waitingOn: "",
+				updated: new Date().toISOString(),
+			});
+		} catch (err) {
+			warn(`could not write this session's running record: ${(err as Error).message}`);
+		}
+	}
 
 	const warn = (message: string) => ctx?.ui.notify(`mailbox: ${message}`, "warning");
 
@@ -272,6 +299,10 @@ export default function mailbox(pi: ExtensionAPI) {
 		}
 		address = id;
 		ensureBoxes(id);
+		name = context.sessionManager.getSessionName?.() || undefined;
+		cwd = context.cwd;
+		state = context.isIdle?.() === false ? "busy" : "idle";
+		announce();
 		updateStatus();
 		// Mail already waiting is claimed on the next event-loop turn. The
 		// runner awaits each `session_start` handler in load order, so every
@@ -302,6 +333,16 @@ export default function mailbox(pi: ExtensionAPI) {
 		if (typeof message.details?.id === "string") seen.add(message.details.id);
 	});
 
+	pi.on("session_info_changed", async (event) => {
+		name = event.name || undefined;
+		announce();
+	});
+
+	pi.on("agent_start", async () => {
+		state = "busy";
+		announce();
+	});
+
 	pi.on("agent_end", async (event) => {
 		const last = lastAssistant(event.messages);
 		lastAnswer = last === undefined ? undefined : assistantText(last);
@@ -326,6 +367,8 @@ export default function mailbox(pi: ExtensionAPI) {
 		lastAnswer = undefined;
 		lastAborted = false;
 		injected = 0;
+		state = "idle";
+		announce();
 		if (me === undefined) return;
 		for (const [to, ids] of replies) {
 			const done = ids.filter((id) => read.has(id));
@@ -343,25 +386,39 @@ export default function mailbox(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		stop();
+		if (address !== undefined) {
+			try {
+				removeRecord(address);
+			} catch {
+				// a record left behind is dropped by the next reader once this process is gone
+			}
+		}
 		address = undefined;
 	});
 
+	registerTools(pi);
+
 	pi.registerCommand("mailbox", {
-		description: "Show this session's mailbox address, or send a message: /mailbox <address> <text>",
+		description: "Show this session's mailbox address and name, or send a request: /mailbox <name or id> <text>",
 		handler: async (args, context) => {
 			const me = context.sessionManager.getSessionId();
 			const trimmed = args.trim();
 			if (trimmed === "") {
-				context.ui.notify(`Mailbox address: ${me}`, "info");
+				const current = context.sessionManager.getSessionName?.() || undefined;
+				context.ui.notify(
+					`Mailbox address: ${me}\nName: ${current === undefined ? `none; other sessions see ${label({ address: me })} (set one with /name)` : current}`,
+					"info",
+				);
 				return;
 			}
 			const match = /^(\S+)\s+([\s\S]+)$/.exec(trimmed);
 			if (!match) {
-				context.ui.notify("Usage: /mailbox <address> <text>", "error");
+				context.ui.notify("Usage: /mailbox <name or id> <text>", "error");
 				return;
 			}
 			try {
-				const envelope = send(me, match[1], match[2].trim(), { kind: "request", hops: 0 });
+				const to = resolveTo(match[1], me);
+				const envelope = send(me, to, match[2].trim(), { kind: "request", hops: 0 });
 				context.ui.notify(`Sent ${envelope.id} to ${envelope.to}`, "info");
 				updateStatus();
 			} catch (err) {
