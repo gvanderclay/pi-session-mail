@@ -20,7 +20,8 @@ request's id alone when this session has no copy.
 When the recipient's agent settles, its last answer goes back to each sender as
 one reply listing the requests it answers, and as a separate reply to each
 sender's asks not already answered with `session_mail_reply`: `done`
-normally, or `stopped` when the user stopped the run, with the partial text.
+normally, `stopped` when the user stopped the run, with the partial text, or
+`failed` when the run ended on an error, with the error and the partial text.
 A request the session was stopped before reading gets a `failed` reply
 instead. Replies and messages are never answered. The answer to an ask its
 sender is still waiting on becomes that sender's `session_mail_ask` result.
@@ -205,7 +206,7 @@ Requests, asks and messages carry no status.
 | --- | --- |
 | `done` | the run settled; the body is its answer |
 | `stopped` | the user stopped the run before it settled; the body says so, then the partial text |
-| `failed` | the session was stopped before it read the request or ask; nothing was done |
+| `failed` | the run did not do the job, and the body says why: either the run ended on an error (such as an API error Pi's retries gave up on), and the body gives the error, then the partial text; or the session was stopped before it read the request or ask, and nothing was done |
 
 ## Hooks
 

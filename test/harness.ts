@@ -198,6 +198,35 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 			idle = true;
 			await fire("agent_settled");
 		},
+		/**
+		 * A run that dies on an API error after Pi's retries give up: the last
+		 * message has `stopReason: "error"` and the abort signal is never set.
+		 * `text`, when given, comes in an earlier message before a tool call.
+		 */
+		failOnApiError: async (errorMessage: string | undefined, text?: string) => {
+			idle = false;
+			signal = new AbortController().signal;
+			await fire("agent_start");
+			await fire("agent_end", {
+				messages: [
+					{ role: "user", content: [{ type: "text", text: "q" }] },
+					...(text === undefined
+						? []
+						: [
+								{
+									role: "assistant",
+									content: [{ type: "text", text }, { type: "toolCall", id: "t1", name: "read", arguments: { path: "x" } }],
+									stopReason: "toolUse",
+								},
+								{ role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "x" }], isError: false },
+							]),
+					{ role: "assistant", content: [], stopReason: "error", ...(errorMessage === undefined ? {} : { errorMessage }) },
+				],
+			});
+			signal = undefined;
+			idle = true;
+			await fire("agent_settled");
+		},
 		agentEnd: (text: string, options: { aborted?: boolean } = {}) =>
 			fire("agent_end", {
 				messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: options.aborted ? "aborted" : "stop" }],

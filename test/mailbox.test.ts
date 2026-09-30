@@ -515,6 +515,31 @@ test("a run stopped during a tool call with no text before it still replies stop
 	assert.doesNotMatch(reply.body, /no answer/i);
 });
 
+test("a run that ends on an API error replies failed with the error and the text before it", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.mailbox(`${b.id} do the thing`);
+	await b.start();
+	await b.failOnApiError("529 overloaded_error", "Reading first.");
+	const [reply] = envelopes(a.id, "new");
+	assert.equal(reply.status, "failed");
+	assert.match(reply.body, /^\(The run ended on an error before it finished: 529 overloaded_error\./);
+	assert.ok(reply.body.includes("Reading first."), reply.body);
+	assert.doesNotMatch(reply.body, /no answer|stopped/i);
+});
+
+test("a run that ends on an API error with no message or text still replies failed", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.mailbox(`${b.id} do the thing`);
+	await b.start();
+	await b.failOnApiError(undefined);
+	const [reply] = envelopes(a.id, "new");
+	assert.equal(reply.status, "failed");
+	assert.match(reply.body, /^\(The run ended on an error before it finished: unknown error\./);
+	assert.doesNotMatch(reply.body, /no answer/i);
+});
+
 test("a stopped run's unseen requests still get a failed reply", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));

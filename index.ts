@@ -14,7 +14,8 @@
 // wake an idle session and steer into a busy one; a reply quotes each request
 // it answers from this session's `sent/` copy and starts no turn. When the recipient settles, its
 // last answer goes back to each sender as one reply — `done` normally, or
-// `stopped` when the user stopped the run, with any partial text. Requests
+// `stopped` when the user stopped the run, with any partial text, or `failed`
+// when the run ended on an error, with the error and any partial text. Requests
 // that never entered the conversation (an abort drops queued follow-ups) get
 // a `failed` reply instead. Replies and messages are never answered. Other extensions use
 // `pi.events` (below).
@@ -55,6 +56,9 @@ const QUOTE_CAP = 2 * 1024;
 const NO_ANSWER = "(The session settled with no answer text.)";
 /** Reply body of a run the user stopped, with any partial answer text after it. */
 const STOPPED = "(The user stopped this run before it finished; the text that follows, if any, is partial.)";
+/** Opening line of the reply body of a run that ended on an error. */
+const ERRORED = (error: string) =>
+	`(The run ended on an error before it finished: ${error}. The text that follows, if any, is partial.)`;
 /** Body of a `failed` reply to requests that never entered the conversation. */
 const UNSEEN = "(The session was stopped before it read the message. Nothing was done; send it again if it is still needed.)";
 
@@ -170,7 +174,7 @@ const INBOUND = "message:inbound";
 type SendPayload = { to: unknown; body: unknown; envelope?: Envelope; error?: string };
 type InboundPayload = { envelope: Envelope; path: string; requests: SentCopy[]; handled: boolean };
 
-type Message = { role?: string; content?: unknown; stopReason?: unknown };
+type Message = { role?: string; content?: unknown; stopReason?: unknown; errorMessage?: unknown };
 
 /** The last assistant message in a run's transcript, if any. */
 function lastAssistant(messages: readonly unknown[]): Message | undefined {
@@ -226,6 +230,8 @@ export default function mailbox(pi: ExtensionAPI) {
 	let lastAnswer: string | undefined;
 	/** Whether the user stopped that run, whatever its last message's `stopReason`. */
 	let lastAborted = false;
+	/** The error that ended that run when the user did not stop it; undefined when none did. */
+	let lastError: string | undefined;
 	/** Messages injected since the last settle, for the status's pending count. */
 	let injected = 0;
 	/**
@@ -373,6 +379,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		seen = new Set();
 		lastAnswer = undefined;
 		lastAborted = false;
+		lastError = undefined;
 		injected = 0;
 		hops = 0;
 		tools?.abandonAsk();
@@ -440,23 +447,38 @@ export default function mailbox(pi: ExtensionAPI) {
 	// `aborted`; stopped during a tool call, Pi 0.99.1 ends the run with an empty
 	// `error` message instead, so the signal is what tells a stop apart. The
 	// partial answer is then the last text the model wrote before the stop.
+	// An `error` message without an aborted signal is a real error (an API
+	// failure Pi's retries gave up on); its partial answer is found the same way.
 	pi.on("agent_end", async (event, context) => {
 		const last = lastAssistant(event.messages);
 		lastAborted = last?.stopReason === "aborted" || context.signal?.aborted === true;
-		lastAnswer = lastAborted ? lastAssistantText(event.messages) : last === undefined ? undefined : assistantText(last);
+		lastError =
+			!lastAborted && last?.stopReason === "error"
+				? typeof last.errorMessage === "string" && last.errorMessage.trim() !== ""
+					? last.errorMessage.trim().replace(/\.+$/, "")
+					: "unknown error"
+				: undefined;
+		lastAnswer =
+			lastAborted || lastError !== undefined
+				? lastAssistantText(event.messages)
+				: last === undefined
+					? undefined
+					: assistantText(last);
 	});
 
 	// Reply only once Pi will not continue on its own: a retry, compaction or
 	// queued follow-up after `agent_end` would otherwise get a premature answer.
 	pi.on("agent_settled", async () => {
 		const me = address;
-		// A stopped run answers `stopped`, notes the stop, then gives what it had.
-		const body = lastAborted
-			? lastAnswer === undefined
-				? STOPPED
-				: `${STOPPED}\n\n${lastAnswer}`
-			: (lastAnswer ?? NO_ANSWER);
-		const status = lastAborted ? "stopped" : "done";
+		// A stopped or errored run notes how it ended, then gives what it had.
+		const opening = lastAborted ? STOPPED : lastError !== undefined ? ERRORED(lastError) : undefined;
+		const body =
+			opening === undefined
+				? (lastAnswer ?? NO_ANSWER)
+				: lastAnswer === undefined
+					? opening
+					: `${opening}\n\n${lastAnswer}`;
+		const status = lastAborted ? "stopped" : lastError !== undefined ? "failed" : "done";
 		// Answers carry the settled turn's count; the next turn counts afresh.
 		const answerHops = hops;
 		hops = 0;
@@ -468,6 +490,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		seen = new Set();
 		lastAnswer = undefined;
 		lastAborted = false;
+		lastError = undefined;
 		injected = 0;
 		state = "idle";
 		announce();
