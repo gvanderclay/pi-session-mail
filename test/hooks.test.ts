@@ -198,6 +198,28 @@ test("the README's message:inbound example takes over a reply, quoting its reque
 	}
 });
 
+test("the README's message:scan example has a waiting reply emitted as message:inbound before emit returns", async () => {
+	const s = session(newId("s"));
+	const r = session(newId("r"));
+	await s.start();
+	await r.start();
+	try {
+		s.events.emit("message:send", { to: r.id, body: "please answer" });
+		await until(() => r.sent.length === 1, "r to receive the request");
+		// r's reply is on disk in s's inbox. Nothing below yields to the event
+		// loop, so s's watcher and poll timer cannot claim it before the scan.
+		await r.answer("the answer");
+		assert.equal(files(s.id, "new").length, 1, "the reply is waiting");
+		await runExample("message:scan", { pi: s.pi, peer: r.id, bareBus: createEventBus() });
+		assert.equal(files(s.id, "new").length, 0, "the scan claimed it");
+		assert.equal(s.sent.length, 1, "and it was delivered before the example's emit returned");
+		assert.match(s.sent[0].message.content, /the answer/);
+	} finally {
+		await s.shutdown();
+		await r.shutdown();
+	}
+});
+
 test("every runnable example in the README has a runner above", () => {
-	assert.deepEqual([...examples.keys()].sort(), ["message:inbound", "message:send", "no-provider"]);
+	assert.deepEqual([...examples.keys()].sort(), ["message:inbound", "message:scan", "message:send", "no-provider"]);
 });

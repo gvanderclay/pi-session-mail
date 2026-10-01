@@ -15,7 +15,9 @@
 // it answers from this session's `sent/` copy and starts no turn. When the recipient settles, its
 // last answer goes back to each sender as one reply — `done` normally, or
 // `stopped` when the user stopped the run, with any partial text, or `failed`
-// when the run ended on an error, with the error and any partial text. Requests
+// when the run ended on an error, with the error and any partial text. A
+// request is never answered `stopped`: a run the user stopped holds it, owed,
+// until a run completes, and that answer says the user took over. Requests
 // that never entered the conversation (an abort drops queued follow-ups) get
 // a `failed` reply instead. Replies and messages are never answered. Other extensions use
 // `pi.events` (below).
@@ -54,6 +56,9 @@ const QUOTE_CAP = 2 * 1024;
 const NO_ANSWER = "(The session settled with no answer text.)";
 /** Reply body of a run the user stopped, with any partial answer text after it. */
 const STOPPED = "(The user stopped this run before it finished; the text that follows, if any, is partial.)";
+/** Opening line of the reply body to a request held across a stop, before the answer of the run that completed it. */
+const TOOK_OVER =
+	"(The user stopped an earlier run partway and took over; the answer that follows is from the run that completed after that.)";
 /** Opening line of the reply body of a run that ended on an error. */
 const ERRORED = (error: string) =>
 	`(The run ended on an error before it finished: ${error}. The text that follows, if any, is partial.)`;
@@ -168,6 +173,8 @@ function inboundText(
  */
 const SEND = "message:send";
 const INBOUND = "message:inbound";
+/** A consumer's request to claim waiting mail now; see the README's `message:scan`. */
+const SCAN = "message:scan";
 
 type SendPayload = { to: unknown; body: unknown; envelope?: Envelope; error?: string };
 type InboundPayload = { envelope: Envelope; path: string; requests: SentCopy[]; handled: boolean };
@@ -224,6 +231,11 @@ export default function mailbox(pi: ExtensionAPI) {
 	let owedAsks = new Map<string, string[]>();
 	/** Owed request ids whose message entered the conversation (or a listener took over). */
 	let seen = new Set<string>();
+	/**
+	 * Request ids held across a stop: the user stopped a run while they were
+	 * owed, so they wait, still owed, for the next run that completes.
+	 */
+	let held = new Set<string>();
 	/** Text of the last assistant message, remembered at `agent_end`. */
 	let lastAnswer: string | undefined;
 	/** Whether the user stopped that run, whatever its last message's `stopReason`. */
@@ -369,12 +381,22 @@ export default function mailbox(pi: ExtensionAPI) {
 		}
 	});
 
+	// Synchronous on purpose: replies are emitted as `message:inbound` before
+	// `emit` returns, and only then is the payload marked scanned.
+	pi.events.on(SCAN, (data) => {
+		const payload = data as { scanned?: boolean };
+		if (typeof payload !== "object" || payload === null) return;
+		scan();
+		payload.scanned = true;
+	});
+
 	pi.on("session_start", async (_event, context) => {
 		stop();
 		ctx = context;
 		owed = new Map();
 		owedAsks = new Map();
 		seen = new Set();
+		held = new Set();
 		lastAnswer = undefined;
 		lastAborted = false;
 		lastError = undefined;
@@ -477,15 +499,43 @@ export default function mailbox(pi: ExtensionAPI) {
 					? opening
 					: `${opening}\n\n${lastAnswer}`;
 		const status = lastAborted ? "stopped" : lastError !== undefined ? "failed" : "done";
+		// A request held across a stop is answered by the run that completes it, saying the user took over.
+		const tookOverBody = `${TOOK_OVER}\n\n${lastAnswer ?? NO_ANSWER}`;
 		// Answers carry the settled turn's count; the next turn counts afresh.
 		const answerHops = hops;
 		hops = 0;
-		// Asks are answered apart from requests, so a waiting asker's answer holds its ask alone.
-		const answers = [...owed, ...owedAsks];
+		// A request the user stopped a run on is the user's to finish, not an
+		// answer yet: it stays owed, through stops and failed runs alike, until a
+		// run completes. Asks are never held; their asker is blocked waiting.
+		const requests = [...owed];
+		const asks = [...owedAsks];
 		const read = seen;
+		const wasHeld = held;
 		owed = new Map();
 		owedAsks = new Map();
 		seen = new Set();
+		held = new Set();
+		const replies: { to: string; ids: string[]; body: string; status: Envelope["status"] }[] = [];
+		for (const [to, ids] of requests) {
+			const unseen = ids.filter((id) => !read.has(id) && !wasHeld.has(id));
+			const keep = ids.filter(
+				(id) => !unseen.includes(id) && (lastAborted || (lastError !== undefined && wasHeld.has(id))),
+			);
+			const answer = ids.filter((id) => !unseen.includes(id) && !keep.includes(id));
+			if (keep.length > 0) owed.set(to, keep);
+			for (const id of keep) held.add(id);
+			const plain = answer.filter((id) => !wasHeld.has(id));
+			const tookOver = answer.filter((id) => wasHeld.has(id));
+			if (plain.length > 0) replies.push({ to, ids: plain, body, status });
+			if (tookOver.length > 0) replies.push({ to, ids: tookOver, body: tookOverBody, status: "done" });
+			if (unseen.length > 0) replies.push({ to, ids: unseen, body: UNSEEN, status: "failed" });
+		}
+		for (const [to, ids] of asks) {
+			const done = ids.filter((id) => read.has(id));
+			const failed = ids.filter((id) => !read.has(id));
+			if (done.length > 0) replies.push({ to, ids: done, body, status });
+			if (failed.length > 0) replies.push({ to, ids: failed, body: UNSEEN, status: "failed" });
+		}
 		lastAnswer = undefined;
 		lastAborted = false;
 		lastError = undefined;
@@ -493,14 +543,11 @@ export default function mailbox(pi: ExtensionAPI) {
 		state = "idle";
 		announce();
 		if (me === undefined) return;
-		for (const [to, ids] of answers) {
-			const done = ids.filter((id) => read.has(id));
-			const failed = ids.filter((id) => !read.has(id));
+		for (const reply of replies) {
+			const { to } = reply;
 			try {
 				// Answers are never refused by the hop limit.
-				if (done.length > 0) send(me, to, body, { kind: "reply", hops: answerHops, inReplyTo: done, status });
-				if (failed.length > 0)
-					send(me, to, UNSEEN, { kind: "reply", hops: answerHops, inReplyTo: failed, status: "failed" });
+				send(me, to, reply.body, { kind: "reply", hops: answerHops, inReplyTo: reply.ids, status: reply.status });
 			} catch (err) {
 				warn(`could not reply to ${to}: ${(err as Error).message}`);
 			}

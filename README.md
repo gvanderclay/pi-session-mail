@@ -22,9 +22,12 @@ one reply listing the requests it answers, and as a separate reply to each
 sender's asks not already answered with `session_mail_reply`: `done`
 normally, `stopped` when the user stopped the run, with the partial text, or
 `failed` when the run ended on an error, with the error and the partial text.
-A request the session was stopped before reading gets a `failed` reply
-instead. Replies and messages are never answered. The answer to an ask its
-sender is still waiting on becomes that sender's `session_mail_ask` result.
+A request is never answered `stopped`: when the user stops a run, the
+requests it read are held for the next run that completes, which answers them
+`done`, saying the user took over (see [Delivery](#delivery)). A request the
+session was stopped before reading gets a `failed` reply instead. Replies and
+messages are never answered. The answer to an ask its sender is still waiting
+on becomes that sender's `session_mail_ask` result.
 The footer shows `✉ N pending · N read · N awaiting`, non-zero counts only;
 `awaiting` counts requests with no answer yet, never messages.
 
@@ -69,7 +72,7 @@ A `to`, typed after `/mailbox` or given to a tool, resolves as follows:
 
 | Kind | Written by | Delivered as | Answered |
 | --- | --- | --- | --- |
-| `request` | `/mailbox <to> <text>`, `message:send` | `triggerTurn`, `deliverAs: "steer"` | yes, when the run settles |
+| `request` | `/mailbox <to> <text>`, `message:send` | `triggerTurn`, `deliverAs: "steer"` | yes, when a run completes; held while the user has taken over |
 | `ask` | `session_mail_ask` | `triggerTurn`, `deliverAs: "steer"` | yes, when the run settles |
 | `message` | `session_mail_send` | `triggerTurn`, `deliverAs: "steer"` | never |
 | `reply` | the answering session | `deliverAs: "followUp"`, no turn; see below for answers to asks | never |
@@ -109,6 +112,17 @@ after it; without the end line, models read that prompt as part of the mail.
 
 Mail counts as read when it enters the conversation (`message_end`). A
 request an abort dropped before that is answered `failed`.
+
+A request the user stops a run on is held, not answered: stopping a run (Esc)
+means the user took over, not that the request is finished. Its sender sees
+no reply yet. It stays owed through further stopped runs and through runs that
+end on an error, and the next run that completes answers it `done`. That
+reply's body opens with `(The user stopped an earlier run partway and took
+over; the answer that follows is from the run that completed after that.)`,
+then that run's answer; the stopped runs' partial text is not included. Asks
+are never held, because their sender is blocked waiting: a stopped run
+answers them `stopped` at once. A held request lives in memory only, so a
+session that shuts down while holding one never answers it.
 
 ## Envelopes
 
@@ -204,14 +218,14 @@ Requests, asks and messages carry no status.
 
 | `status` | Meaning |
 | --- | --- |
-| `done` | the run settled; the body is its answer |
-| `stopped` | the user stopped the run before it settled; the body says so, then the partial text |
+| `done` | the run settled; the body is its answer, opening with a note that the user took over when the request was held across a stop |
+| `stopped` | the user stopped the run before it settled; the body says so, then the partial text. Only asks are answered `stopped`; requests are held instead |
 | `failed` | the run did not do the job, and the body says why: either the run ended on an error (such as an API error Pi's retries gave up on), and the body gives the error, then the partial text; or the session was stopped before it read the request or ask, and nothing was done |
 
 ## Hooks
 
-`mailbox` provides both hooks below and consumes none. Both are `pi.events`
-channels, and both depend on listeners doing all their work
+`mailbox` provides all three hooks below and consumes none. All are `pi.events`
+channels, and all depend on listeners doing all their work
 **synchronously**: the emitter reads the results off the payload the moment
 `emit` returns, so a listener must finish before its first `await`.
 
@@ -305,4 +319,36 @@ pi.events.on("message:inbound", (payload) => {
     { triggerTurn: true, deliverAs: "followUp" },
   );
 });
+```
+
+### `message:scan`
+
+A consumer emits `{}` to have `mailbox` claim the mail waiting in its inbox
+now, instead of at the next watcher event or poll. The listener runs the
+inbox scan synchronously, so every waiting envelope has been emitted as
+`message:inbound` (and delivered) by the time `emit` returns, and then sets
+`scanned` to `true`. **If `scanned` is not set, no provider is installed**,
+and the consumer must not conclude that no reply is waiting.
+
+| Field | Set by | Meaning |
+| --- | --- | --- |
+| `scanned` | provider | `true` once the scan has finished and its `message:inbound` events were emitted |
+
+`delegate` uses this before checking whether a delegate's window is gone, so
+a reply written just before the window closed is claimed first.
+
+```js message:scan
+// Claim waiting mail now; a waiting reply reaches `message:inbound` listeners
+// before `emit` returns. This example runs with one reply waiting.
+const seen = [];
+pi.events.on("message:inbound", (inbound) => seen.push(inbound.envelope.id));
+const payload = {};
+pi.events.emit("message:scan", payload);
+assert.equal(payload.scanned, true);
+assert.equal(seen.length, 1, "the waiting reply was emitted during emit");
+
+// With no provider installed, `scanned` stays unset.
+const probe = {};
+bareBus.emit("message:scan", probe);
+assert.equal(probe.scanned, undefined);
 ```

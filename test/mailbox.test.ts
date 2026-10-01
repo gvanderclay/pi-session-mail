@@ -460,59 +460,88 @@ test("a failed reply is injected with a header saying the request failed", async
 // ---------------------------------------------------------------------------
 // Stopped runs, quoted requests, quiet replies
 
-test("a run the user stopped replies stopped, noting the stop and the partial text", async () => {
+test("a run the user stopped holds the request, and the next completed run answers it done, saying the user took over", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
 	await a.mailbox(`${b.id} do the thing`);
 	const [request] = envelopes(a.id, "sent");
 	await b.start();
 	await b.answer("half of the answer", { aborted: true });
+	assert.deepEqual(envelopes(a.id, "new"), []);
+	await b.input("do it this way instead");
+	await b.answer("the steered answer");
 	const [reply] = envelopes(a.id, "new");
-	assert.equal(reply.status, "stopped");
+	assert.equal(reply.status, "done");
 	assert.deepEqual(reply.in_reply_to, [request.id]);
-	assert.match(reply.body, /^\(The user stopped this run/);
-	assert.ok(reply.body.includes("half of the answer"), reply.body);
+	assert.match(reply.body, /^\(The user stopped an earlier run partway and took over/);
+	assert.ok(reply.body.includes("the steered answer"), reply.body);
+	assert.ok(!reply.body.includes("half of the answer"), reply.body);
 	await a.start();
 	await a.shutdown();
 	await b.shutdown();
 	assert.equal(a.sent.length, 1);
-	assert.match(a.sent[0].message.content, /"stopped", not "done"/);
+	assert.doesNotMatch(a.sent[0].message.content, /not "done"/);
 });
 
-test("a stopped run with no partial text still says the user stopped it", async () => {
+test("a held request answered by a run with no text says the user took over and that there is no answer text", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
 	await a.mailbox(`${b.id} do the thing`);
 	await b.start();
 	await b.answer(undefined, { aborted: true });
+	assert.deepEqual(envelopes(a.id, "new"), []);
+	await b.answer(undefined);
 	const [reply] = envelopes(a.id, "new");
-	assert.equal(reply.status, "stopped");
-	assert.match(reply.body, /^\(The user stopped this run/);
-	assert.doesNotMatch(reply.body, /no answer/i);
+	assert.equal(reply.status, "done");
+	assert.match(reply.body, /^\(The user stopped an earlier run partway and took over/);
+	assert.match(reply.body, /no answer text/);
 });
 
-test("a run the user stopped during a tool call replies stopped, with the text before the call", async () => {
+test("a run the user stopped during a tool call holds the request, and the next completed run answers it", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
 	await a.mailbox(`${b.id} do the thing`);
 	await b.start();
 	await b.stopInToolCall("Sleeping first.");
+	assert.deepEqual(envelopes(a.id, "new"), []);
+	await b.answer("done after all");
 	const [reply] = envelopes(a.id, "new");
-	assert.equal(reply.status, "stopped");
-	assert.match(reply.body, /^\(The user stopped this run/);
-	assert.ok(reply.body.includes("Sleeping first."), reply.body);
+	assert.equal(reply.status, "done");
+	assert.match(reply.body, /^\(The user stopped an earlier run partway and took over/);
+	assert.ok(reply.body.includes("done after all"), reply.body);
+	assert.ok(!reply.body.includes("Sleeping first."), reply.body);
 });
 
-test("a run stopped during a tool call with no text before it still replies stopped", async () => {
+test("a request stays held through a second stop and a failed run, then gets one done reply", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.mailbox(`${b.id} do the thing`);
+	const [request] = envelopes(a.id, "sent");
+	await b.start();
+	await b.answer("first try", { aborted: true });
+	await b.stopInToolCall("second try");
+	await b.failOnApiError("529 overloaded_error", "third try");
+	assert.deepEqual(envelopes(a.id, "new"), []);
+	await b.answer("finally");
+	const replies = envelopes(a.id, "new");
+	assert.equal(replies.length, 1);
+	assert.equal(replies[0].status, "done");
+	assert.deepEqual(replies[0].in_reply_to, [request.id]);
+	assert.match(replies[0].body, /^\(The user stopped an earlier run partway and took over/);
+	assert.ok(replies[0].body.includes("finally"), replies[0].body);
+	await b.answer("a later run");
+	assert.equal(envelopes(a.id, "new").length, 1, "a held request is answered once");
+});
+
+test("a failed run with no stop before it still replies failed", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
 	await a.mailbox(`${b.id} do the thing`);
 	await b.start();
-	await b.stopInToolCall();
+	await b.failOnApiError("529 overloaded_error");
 	const [reply] = envelopes(a.id, "new");
-	assert.equal(reply.status, "stopped");
-	assert.match(reply.body, /^\(The user stopped this run/);
-	assert.doesNotMatch(reply.body, /no answer/i);
+	assert.equal(reply.status, "failed");
+	assert.doesNotMatch(reply.body, /took over/);
 });
 
 test("a run that ends on an API error replies failed with the error and the text before it", async () => {
@@ -540,7 +569,7 @@ test("a run that ends on an API error with no message or text still replies fail
 	assert.doesNotMatch(reply.body, /no answer/i);
 });
 
-test("a stopped run's unseen requests still get a failed reply", async () => {
+test("a stopped run's unseen requests still get a failed reply, and its read ones are held", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
 	await a.mailbox(`${b.id} read this`);
@@ -552,10 +581,10 @@ test("a stopped run's unseen requests still get a failed reply", async () => {
 	await b.answer("partial", { aborted: true });
 	await b.shutdown();
 	const replies = envelopes(a.id, "new");
-	const stopped = replies.find((r) => r.status === "stopped");
-	const failed = replies.find((r) => r.status === "failed");
-	assert.deepEqual(stopped?.in_reply_to, [readId]);
-	assert.deepEqual(failed?.in_reply_to, [droppedId]);
+	assert.equal(replies.length, 1);
+	assert.equal(replies[0].status, "failed");
+	assert.deepEqual(replies[0].in_reply_to, [droppedId]);
+	assert.ok(!replies.some((r) => r.in_reply_to.includes(readId)), "the read request is held");
 });
 
 test("an injected reply quotes every request it answers with its sent/ copy's path", async () => {
