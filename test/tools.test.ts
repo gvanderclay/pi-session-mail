@@ -912,3 +912,53 @@ test("an ask answered at settle cannot be answered again by session_mail_reply",
 	await a.shutdown();
 	await b.shutdown();
 });
+
+test("session_mail_reply after shutdown is refused for want of a mailbox address, writing nothing", async () => {
+	const { a, b } = await pair();
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "q" });
+	await until(() => b.sent.length === 1, "the ask to be injected");
+	const [ask] = envelopes(a.id, "sent");
+	await b.shutdown();
+	await assert.rejects(
+		b.toolCall("session_mail_reply", { ask: ask.id, message: "too late" }),
+		/^Error: this session has no mailbox address; nothing was sent$/,
+	);
+	assert.equal(envelopes(a.id, "new").length + envelopes(a.id, "cur").length, 0, "no reply envelope");
+	await a.shutdown();
+	await asked;
+});
+
+test("an ask whose delivery throws before it is armed gets no answer at settle", async () => {
+	const { a, b } = await pair();
+	// A real bus never lets a listener's throw reach `deliver` (it catches them),
+	// so the throw is made at `emit`, but only inside the synchronous scan below.
+	const emit = b.events.emit.bind(b.events);
+	let scanning = false;
+	b.events.emit = (channel: string, data: unknown) => {
+		if (channel === "message:scan") {
+			scanning = true;
+			try {
+				return emit(channel, data);
+			} finally {
+				scanning = false;
+			}
+		}
+		if (channel === "message:inbound" && scanning) throw new Error("listener failed");
+		return emit(channel, data);
+	};
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "q" });
+	const originalError = console.error;
+	console.error = () => {};
+	try {
+		b.events.emit("message:scan", {});
+	} finally {
+		console.error = originalError;
+	}
+	assert.equal(envelopes(b.id, "cur").length, 1, "the ask was claimed");
+	assert.equal(b.sent.length, 0, "the ask was never injected");
+	await b.answer("an answer nobody asked for");
+	assert.equal(envelopes(a.id, "new").length + envelopes(a.id, "cur").length, 0, "no reply to the ask");
+	await a.shutdown();
+	await asked;
+	await b.shutdown();
+});

@@ -19,7 +19,7 @@ import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil
 import { Type } from "typebox";
 
 import { label, listRunning, type RunningRecord, resolveTo } from "./running.ts";
-import { type Envelope, isAddress, send } from "./store.ts";
+import { type Envelope, send } from "./store.ts";
 
 /** What the tools need from the extension around them. */
 export type ToolHooks = {
@@ -35,8 +35,12 @@ export type ToolHooks = {
 
 /** What the extension needs from the tools: the ask that is waiting, and the asks owed. */
 export type Tools = {
-	/** Note a claimed envelope: its kind, and, for an ask, that its sender is owed an answer. */
-	received: (envelope: Envelope) => void;
+	/** Remember the kind of a claimed envelope, so a refused reply can say why; never forgotten. */
+	recordKind: (envelope: Envelope) => void;
+	/** Arm an answer for an ask: its sender is owed one. Any other kind is ignored. */
+	armAsk: (envelope: Envelope) => void;
+	/** The session's mailbox address, or undefined when it has none (before a valid start, after shutdown); owed asks are dropped. */
+	setAddress: (address: string | undefined) => void;
 	/** The ask ids still owed an answer, by sender; they are no longer owed afterwards. */
 	takeOwedAsks: () => Map<string, string[]>;
 	/** Hand a reply to the waiting ask it answers; false when it answers none, so it is delivered as usual. */
@@ -165,10 +169,13 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 	const receivedKinds = new Map<string, Envelope["kind"]>();
 	/** Ask ids awaiting this session's answer, keyed by sender; answered apart from requests. */
 	let owedAsks = new Map<string, string[]>();
+	/** This session's address as the extension last set it; undefined when it has none. */
+	let address: string | undefined;
 
 	/** Answer the open ask `id` with `body` at once; throws, sending nothing, when it cannot. */
-	function reply(me: string, id: string, body: string): Envelope {
-		if (!isAddress(me)) throw new Error("this session has no mailbox address; nothing was sent");
+	function reply(id: string, body: string): Envelope {
+		const me = address;
+		if (me === undefined) throw new Error("this session has no mailbox address; nothing was sent");
 		const kind = receivedKinds.get(id);
 		if (kind === undefined)
 			throw new Error(`no mail with id ${JSON.stringify(id)} reached this session; nothing was sent`);
@@ -321,13 +328,12 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 			params: { ask: string; message: string },
 			_signal: unknown,
 			_onUpdate: unknown,
-			ctx: ExtensionContext,
+			_ctx: ExtensionContext,
 		) {
-			const me = ctx.sessionManager.getSessionId();
 			const id = typeof params.ask === "string" ? params.ask.trim() : "";
 			const body = typeof params.message === "string" ? params.message.trim() : "";
 			if (body === "") throw new Error("the answer is empty; nothing was sent");
-			const answer = reply(me, id, body);
+			const answer = reply(id, body);
 			hooks.sent();
 			const sender = listRunning().find((record) => record.address === answer.to);
 			const who = sender === undefined ? answer.to : `${label(sender)} (${answer.to})`;
@@ -340,9 +346,15 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 	});
 
 	return {
-		received(envelope) {
+		recordKind(envelope) {
 			receivedKinds.set(envelope.id, envelope.kind);
+		},
+		armAsk(envelope) {
 			if (envelope.kind === "ask") owedAsks.set(envelope.from, [...(owedAsks.get(envelope.from) ?? []), envelope.id]);
+		},
+		setAddress(next) {
+			address = next;
+			owedAsks = new Map();
 		},
 		takeOwedAsks() {
 			const taken = owedAsks;

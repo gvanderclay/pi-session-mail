@@ -291,7 +291,7 @@ export default function mailbox(pi: ExtensionAPI) {
 
 	function deliver(me: string, envelope: Envelope, path: string) {
 		delivered.add(envelope.id);
-		tools?.received(envelope);
+		tools?.recordKind(envelope);
 		// The answer to a waiting ask is that tool call's result, and nothing else.
 		if (tools?.takeAnswer(envelope)) return;
 		const { requests, quotes } = requestQuotes(me, envelope.in_reply_to);
@@ -305,6 +305,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		// Only requests arm an answer: replies are never answered, and messages
 		// expect none. A request arms one even when a listener took over its display.
 		if (envelope.kind === "request") owed.set(envelope.from, [...(owed.get(envelope.from) ?? []), envelope.id]);
+		tools?.armAsk(envelope);
 		// Mail that wakes or steers the session raises its count; a reply shown
 		// quietly starts no turn, but one a listener took over may.
 		if (wakes || inbound.handled) hops = Math.max(hops, envelope.hops + 1);
@@ -378,7 +379,6 @@ export default function mailbox(pi: ExtensionAPI) {
 		stop();
 		ctx = context;
 		owed = new Map();
-		tools?.takeOwedAsks();
 		seen = new Set();
 		held = new Set();
 		lastAnswer = undefined;
@@ -392,10 +392,12 @@ export default function mailbox(pi: ExtensionAPI) {
 		const id = context.sessionManager.getSessionId();
 		if (!isAddress(id)) {
 			address = undefined;
+			tools?.setAddress(undefined);
 			warn(`session id ${JSON.stringify(id)} is not a usable address; the mailbox is off`);
 			return;
 		}
 		address = id;
+		tools?.setAddress(id);
 		ensureBoxes(id);
 		name = context.sessionManager.getSessionName?.() || undefined;
 		cwd = context.cwd;
@@ -523,6 +525,7 @@ export default function mailbox(pi: ExtensionAPI) {
 			}
 		}
 		address = undefined;
+		tools?.setAddress(undefined);
 	});
 
 	tools = registerTools(pi, {
