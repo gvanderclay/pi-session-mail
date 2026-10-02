@@ -5,11 +5,12 @@
 // change in the code fails here. The name after the fence's `js` marker
 // selects the test below that runs it, and `test("...")` at the end fails
 // when a fence has no runner.
-import { test } from "node:test";
+
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { test } from "node:test";
 
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 
@@ -48,7 +49,7 @@ function readmeExamples(): Map<string, string> {
 }
 
 const examples = readmeExamples();
-const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
+const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
 	...args: string[]
 ) => (...args: unknown[]) => Promise<void>;
 

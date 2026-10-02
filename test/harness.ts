@@ -2,12 +2,13 @@
 // mail folder. Importing this points `PI_CODING_AGENT_DIR` and
 // `XDG_STATE_HOME` at a throwaway directory, so every fake session in a test
 // file shares one mail root, as sessions on one machine do.
-import { after } from "node:test";
+
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { after } from "node:test";
 
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 
@@ -41,7 +42,10 @@ export const records = () => {
 /** A fresh session id, shaped like the ones Pi makes. The label only reads well in a failure. */
 export const newId = (_label?: string) => randomUUID();
 
-export type Sent = { message: { customType: string; content: string; display: boolean; details?: unknown }; options: unknown };
+export type Sent = {
+	message: { customType: string; content: string; display: boolean; details?: unknown };
+	options: unknown;
+};
 type Handler = (event: unknown, ctx: unknown) => unknown;
 type ToolResult = { content: { type: string; text: string }[]; details: unknown };
 type Tool = {
@@ -144,7 +148,8 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 		sessionStart: (reason = "startup") => fire("session_start", { reason }),
 		shutdown: () => fire("session_shutdown"),
 		/** The user typed `text`, or sent it over RPC or through a command (`source`). */
-		input: (text: string, source: "interactive" | "rpc" | "extension" = "interactive") => fire("input", { text, source }),
+		input: (text: string, source: "interactive" | "rpc" | "extension" = "interactive") =>
+			fire("input", { text, source }),
 		/** A run starts: the session is busy until it settles. */
 		agentStart: () => {
 			idle = false;
@@ -190,7 +195,13 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 						],
 						stopReason: "toolUse",
 					},
-					{ role: "toolResult", toolCallId: "t1", toolName: "bash", content: [{ type: "text", text: "Command aborted" }], isError: true },
+					{
+						role: "toolResult",
+						toolCallId: "t1",
+						toolName: "bash",
+						content: [{ type: "text", text: "Command aborted" }],
+						isError: true,
+					},
 					{ role: "assistant", content: [], stopReason: "error", errorMessage: "This operation was aborted" },
 				],
 			});
@@ -215,12 +226,26 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 						: [
 								{
 									role: "assistant",
-									content: [{ type: "text", text }, { type: "toolCall", id: "t1", name: "read", arguments: { path: "x" } }],
+									content: [
+										{ type: "text", text },
+										{ type: "toolCall", id: "t1", name: "read", arguments: { path: "x" } },
+									],
 									stopReason: "toolUse",
 								},
-								{ role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "x" }], isError: false },
+								{
+									role: "toolResult",
+									toolCallId: "t1",
+									toolName: "read",
+									content: [{ type: "text", text: "x" }],
+									isError: false,
+								},
 							]),
-					{ role: "assistant", content: [], stopReason: "error", ...(errorMessage === undefined ? {} : { errorMessage }) },
+					{
+						role: "assistant",
+						content: [],
+						stopReason: "error",
+						...(errorMessage === undefined ? {} : { errorMessage }),
+					},
 				],
 			});
 			signal = undefined;
@@ -229,7 +254,9 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 		},
 		agentEnd: (text: string, options: { aborted?: boolean } = {}) =>
 			fire("agent_end", {
-				messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: options.aborted ? "aborted" : "stop" }],
+				messages: [
+					{ role: "assistant", content: [{ type: "text", text }], stopReason: options.aborted ? "aborted" : "stop" },
+				],
 			}),
 		settle: () => {
 			idle = true;

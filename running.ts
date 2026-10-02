@@ -1,4 +1,4 @@
-// Running-session records and `to` resolution. Internal to `mailbox`: tests
+// Running-session records and `to` resolution. Internal to `pi-session-mail`: tests
 // reach it only through the extension's registration function.
 //
 // Each running session announces itself in `<root>/running/<address>.json`:
@@ -135,10 +135,14 @@ export function resolveTo(to: string, me: string): string {
 	} else {
 		const byName = running.filter((record) => record.name === wanted);
 		const byPrefix =
-			byName.length === 0 && wanted.length >= SHORT_ID ? running.filter((record) => record.address.startsWith(wanted)) : [];
+			byName.length === 0 && wanted.length >= SHORT_ID
+				? running.filter((record) => record.address.startsWith(wanted))
+				: [];
 		const matches = byName.length > 0 ? byName : byPrefix;
 		if (matches.length > 1)
-			throw new Error(`${JSON.stringify(wanted)} matches several running sessions: ${candidates(matches)}; use a full id`);
+			throw new Error(
+				`${JSON.stringify(wanted)} matches several running sessions: ${candidates(matches)}; use a full id`,
+			);
 		if (matches.length === 0)
 			throw new Error(
 				`no running session is named ${JSON.stringify(wanted)} or has an id starting with it${

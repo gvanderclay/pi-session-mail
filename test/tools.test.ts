@@ -2,11 +2,12 @@
 // full id or short id. The tests drive the extension only through its
 // registration function; each one gets its own mail root, so the list holds
 // only the sessions it started.
-import { test, beforeEach } from "node:test";
+
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { beforeEach, test } from "node:test";
 
 import { dir, envelopes, files, newId, records, session, stateRoot, turn, until } from "./harness.ts";
 
@@ -27,7 +28,10 @@ function plantRecord(address: string, fields: Record<string, unknown>) {
 	const running = join(stateRoot(), "running");
 	mkdirSync(running, { recursive: true });
 	const path = join(running, `${address}.json`);
-	writeFileSync(path, JSON.stringify({ address, cwd: "/elsewhere", state: "idle", waitingOn: "", updated: "", ...fields }));
+	writeFileSync(
+		path,
+		JSON.stringify({ address, cwd: "/elsewhere", state: "idle", waitingOn: "", updated: "", ...fields }),
+	);
 	return path;
 }
 
@@ -123,7 +127,10 @@ test("the list shows whom a session waits on", async () => {
 	const waiter = newId();
 	plantRecord(waiter, { pid: process.pid, name: "waiter", waitingOn: a.id });
 	const text = (await a.toolCall("session_mail_list")).content[0].text;
-	assert.ok(text.includes(`- waiter\n  id: ${waiter}\n  cwd: /elsewhere\n  state: idle, waiting on alpha (${a.id})`), text);
+	assert.ok(
+		text.includes(`- waiter\n  id: ${waiter}\n  cwd: /elsewhere\n  state: idle, waiting on alpha (${a.id})`),
+		text,
+	);
 	await a.shutdown();
 });
 
@@ -266,7 +273,10 @@ test("/mailbox with no arguments shows the address and the name, or the short id
 	assert.equal(a.notes.at(-1), `Mailbox address: ${a.id}\nName: planner`);
 	const b = session(newId());
 	await b.mailbox("");
-	assert.equal(b.notes.at(-1), `Mailbox address: ${b.id}\nName: none; other sessions see ${b.id.slice(0, 8)} (set one with /name)`);
+	assert.equal(
+		b.notes.at(-1),
+		`Mailbox address: ${b.id}\nName: none; other sessions see ${b.id.slice(0, 8)} (set one with /name)`,
+	);
 });
 
 // ---------------------------------------------------------------------------
@@ -283,14 +293,20 @@ test("a message to an idle session starts a turn by steering, labelled with the 
 	assert.equal(message.hops, 0);
 	assert.equal(message.to, b.id);
 	assert.equal(message.body, "heads up");
-	assert.equal(result.content[0].text, `Sent message ${message.id} to bravo (${b.id}). It expects no answer; any answer arrives as a message.`);
+	assert.equal(
+		result.content[0].text,
+		`Sent message ${message.id} to bravo (${b.id}). It expects no answer; any answer arrives as a message.`,
+	);
 	assert.deepEqual(result.details, { id: message.id, to: b.id, running: true });
 
 	await until(() => b.sent.length === 1, "the message to be injected");
 	assert.deepEqual(b.sent[0].options, { triggerTurn: true, deliverAs: "steer" });
 	const content = b.sent[0].message.content;
 	assert.ok(content.startsWith(`[mailbox] From alpha (${a.id}, working in `), content);
-	assert.match(content, /\), another Pi session on this machine\. It expects no answer; if one is wanted, send it with session_mail_send to /);
+	assert.match(
+		content,
+		/\), another Pi session on this machine\. It expects no answer; if one is wanted, send it with session_mail_send to /,
+	);
 	assert.ok(!/not from the user|untrusted/.test(content), content);
 	assert.match(content, /heads up\n\n\[mailbox\] End of the mail from /);
 	await a.shutdown();
@@ -306,7 +322,10 @@ test("a message to a busy session is steered in, not queued as a follow-up", asy
 	await a.toolCall("session_mail_send", { to: b.id, message: "change course" });
 	await until(() => b.sent.length === 1, "the message to be injected");
 	assert.deepEqual(b.sent[0].options, { triggerTurn: true, deliverAs: "steer" });
-	assert.ok(b.sent[0].message.content.startsWith(`[mailbox] From ${a.id.slice(0, 8)} (${a.id}, `), "an unnamed sender shows its short id");
+	assert.ok(
+		b.sent[0].message.content.startsWith(`[mailbox] From ${a.id.slice(0, 8)} (${a.id}, `),
+		"an unnamed sender shows its short id",
+	);
 	await a.shutdown();
 	await b.shutdown();
 });
@@ -337,7 +356,10 @@ test("a message to a closed session's full id waits in its new/, and the result 
 	const result = await a.toolCall("session_mail_send", { to: closed, message: "when you are back" });
 	const [waiting] = envelopes(closed, "new");
 	assert.equal(waiting.kind, "message");
-	assert.match(result.content[0].text, new RegExp(`left for ${closed}, which is not running: it waits in that session's inbox`));
+	assert.match(
+		result.content[0].text,
+		new RegExp(`left for ${closed}, which is not running: it waits in that session's inbox`),
+	);
 	assert.equal((result.details as { running: boolean }).running, false);
 	await a.shutdown();
 });
@@ -350,8 +372,14 @@ test("session_mail_send refuses an empty text, an unknown or ambiguous to, and t
 	await b.start();
 	await c.start();
 	await assert.rejects(a.toolCall("session_mail_send", { to: b.id, message: "   " }), /empty/);
-	await assert.rejects(a.toolCall("session_mail_send", { to: "nobody", message: "hi" }), /no running session is named "nobody"/);
-	await assert.rejects(a.toolCall("session_mail_send", { to: "twin", message: "hi" }), /matches several running sessions/);
+	await assert.rejects(
+		a.toolCall("session_mail_send", { to: "nobody", message: "hi" }),
+		/no running session is named "nobody"/,
+	);
+	await assert.rejects(
+		a.toolCall("session_mail_send", { to: "twin", message: "hi" }),
+		/matches several running sessions/,
+	);
 	await assert.rejects(a.toolCall("session_mail_send", { to: "me", message: "hi" }), /cannot send mail to itself/);
 	assert.deepEqual(files(a.id, "sent"), []);
 	assert.deepEqual(files(b.id, "new"), []);
@@ -378,7 +406,9 @@ function plant(to: string, from: string, hops: number, kind = "message") {
 async function stampedHops(s: ReturnType<typeof session>, to: string): Promise<number> {
 	const result = await s.toolCall("session_mail_send", { to, message: "next" });
 	const id = (result.details as { id: string }).id;
-	return envelopes(to, "new").concat(envelopes(to, "cur")).find((e) => e.id === id).hops;
+	return envelopes(to, "new")
+		.concat(envelopes(to, "cur"))
+		.find((e) => e.id === id).hops;
 }
 
 test("a message raises the recipient's count to its hops + 1, which its next send stamps", async () => {
@@ -521,7 +551,10 @@ test("session-mail.json sets the hop limit, read at each send", async () => {
 		plant(s.id, newId(), 1);
 		await until(() => s.sent.length === 2, "the second message");
 		await assert.rejects(s.toolCall("session_mail_send", { to: newId(), message: "at 2" }), /hop limit of 2/);
-		writeFileSync(join(process.env.PI_CODING_AGENT_DIR as string, "session-mail.json"), JSON.stringify({ hopLimit: 3 }));
+		writeFileSync(
+			join(process.env.PI_CODING_AGENT_DIR as string, "session-mail.json"),
+			JSON.stringify({ hopLimit: 3 }),
+		);
 		await s.toolCall("session_mail_send", { to: newId(), message: "at 2, limit 3" });
 		assert.deepEqual(s.warnings, []);
 		await s.shutdown();
@@ -710,7 +743,10 @@ test("asking a session that waits on this one is refused at once", async () => {
 test("an ask to a session that is not running is refused, and so are this session, unknown and ambiguous names", async () => {
 	const { a, b } = await pair();
 	const closed = newId();
-	await assert.rejects(a.toolCall("session_mail_ask", { to: closed, message: "hi" }), /is not running, so it cannot answer/);
+	await assert.rejects(
+		a.toolCall("session_mail_ask", { to: closed, message: "hi" }),
+		/is not running, so it cannot answer/,
+	);
 	await assert.rejects(a.toolCall("session_mail_ask", { to: "alpha", message: "hi" }), /cannot send mail to itself/);
 	await assert.rejects(a.toolCall("session_mail_ask", { to: "nobody", message: "hi" }), /no running session is named/);
 	await assert.rejects(a.toolCall("session_mail_ask", { to: "bravo", message: " " }), /empty/);
@@ -844,7 +880,10 @@ test("session_mail_reply refuses a second reply, a request, a message, an unknow
 	await asked;
 	const count = () => envelopes(a.id, "new").length + envelopes(a.id, "cur").length;
 	assert.equal(count(), 1);
-	await assert.rejects(b.toolCall("session_mail_reply", { ask: id("ask"), message: "twice" }), /is already answered; nothing was sent/);
+	await assert.rejects(
+		b.toolCall("session_mail_reply", { ask: id("ask"), message: "twice" }),
+		/is already answered; nothing was sent/,
+	);
 	await assert.rejects(
 		b.toolCall("session_mail_reply", { ask: id("request"), message: "x" }),
 		/is a request, not an ask; nothing was sent\. A request is answered automatically when this run settles/,
@@ -853,7 +892,10 @@ test("session_mail_reply refuses a second reply, a request, a message, an unknow
 		b.toolCall("session_mail_reply", { ask: id("message"), message: "x" }),
 		/is a message, not an ask; nothing was sent\. A message expects no answer/,
 	);
-	await assert.rejects(b.toolCall("session_mail_reply", { ask: "no-such-id", message: "x" }), /no mail with id "no-such-id" reached this session/);
+	await assert.rejects(
+		b.toolCall("session_mail_reply", { ask: "no-such-id", message: "x" }),
+		/no mail with id "no-such-id" reached this session/,
+	);
 	assert.equal(count(), 1);
 	await a.shutdown();
 	await b.shutdown();

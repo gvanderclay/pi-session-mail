@@ -1,4 +1,4 @@
-// The mailbox's directories and envelopes on disk. Internal to `mailbox`:
+// The mailbox's directories and envelopes on disk. Internal to `pi-session-mail`:
 // tests reach it only through the extension's registration function.
 //
 // Layout: <root>/<address>/{tmp,new,cur,sent}/<ms>-<id>.json, where the root
