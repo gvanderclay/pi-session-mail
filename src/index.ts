@@ -155,7 +155,7 @@ function inboundText(
  * synchronous code before `emit` returns; do all work before any `await`.
  *
  * - `message:send`: the caller emits `{ to, body }`; `pi-session-mail` writes a
- *   request and sets `envelope` (or `error`) on the same object. Neither set
+ *   request, stamped with the run's hop count during a run and 0 when idle, and sets `envelope` (or `error`) on the same object. Neither set
  *   means no provider is installed.
  * - `message:inbound`: emitted for every claimed envelope, requests and
  *   replies alike, before injection; `requests` holds a reply's request
@@ -373,8 +373,11 @@ export default function mailbox(pi: ExtensionAPI) {
 		try {
 			if (address === undefined) throw new Error("no active session has a mailbox address");
 			if (typeof payload.body !== "string") throw new Error("body must be a string");
-			// A `message:send` caller acts for the user, so its request starts a fresh chain.
-			payload.envelope = send(address, payload.to as string, payload.body, { kind: "request", hops: 0 });
+			// During a run the caller is the model acting through an extension, so the
+			// request continues the run's chain; idle, it acts for the user and starts a
+			// fresh one. It is never refused here: the receiving side enforces the limit.
+			const hopsNow = state === "busy" ? hops : 0;
+			payload.envelope = send(address, payload.to as string, payload.body, { kind: "request", hops: hopsNow });
 			updateStatus();
 		} catch (err) {
 			payload.error = (err as Error).message;

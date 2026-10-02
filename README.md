@@ -192,6 +192,11 @@ Every envelope is a JSON file with `id`, `from`, `to`, `kind`, `hops`,
 - `message`, plain mail that expects no answer.
 - `ask`, a question whose sender waits for the answer, answered like a request.
 
+A `kind` this version does not know is read as `message`: the envelope is
+delivered, wakes the session and expects no answer. The original value is not
+kept. This lets a copy of the package that is older than the sender's still
+deliver its mail.
+
 `hops` is a non-negative integer counting how many times a chain of mail has
 woken or steered a session with no person typing (see
 [Hop limit](#hop-limit)). An envelope written before `kind` and `hops` existed
@@ -222,8 +227,11 @@ are refused before anything is written once the count has reached the limit (5
 unless `session-mail.json` says otherwise; see
 [Configuration](#configuration)). The refusal says that a person typing in
 either session starts the count again. Automatic answers carry the count and
-are never refused. Requests from `/mailbox` and `message:send` carry 0 and are
-never refused: their senders act for the user. The limit is a loop guard, not a
+are never refused. Requests from `/mailbox` carry 0 and are never refused:
+their sender acts for the user. A `message:send` emitted while the session is
+idle carries 0 too. One emitted during a run carries that run's count and is
+not refused at send time; the session that receives it counts it like any
+other mail, so a chain that reaches the limit is refused there as a loop. The limit is a loop guard, not a
 security boundary: a hand-written envelope can claim any `hops`.
 
 ## Configuration
@@ -269,9 +277,9 @@ runs that block.
 
 The consumer emits `{ to, body }`. Consumers send on the user's behalf: a
 command the user typed, or a tool whose call the user started. A provider
-writes a request (`kind: "request"`, `hops: 0`) from its own session's address
-and sets `envelope` on the same object before `emit` returns, or sets `error`
-instead. **If neither is set, no provider is
+writes a request (`kind: "request"`) from its own session's address and sets
+`envelope` on the same object before `emit` returns, or sets `error` instead.
+**If neither is set, no provider is
 installed**, and the consumer should refuse rather than pretend the message
 was sent.
 
@@ -279,8 +287,15 @@ was sent.
 | --- | --- | --- |
 | `to` | consumer | the recipient's address: a session id |
 | `body` | consumer | the message text |
-| `envelope` | provider | the written request: `id`, `from`, `to`, `kind` (`"request"`), `hops` (`0`), `in_reply_to`, `status`, `ts`, `body` |
+| `envelope` | provider | the written request: `id`, `from`, `to`, `kind` (`"request"`), `hops` (the run's hop count during a run, `0` when idle), `in_reply_to`, `status`, `ts`, `body` |
 | `error` | provider | why nothing was written: no active session, or an invalid `to` or `body` |
+
+While a run is active, between `agent_start` and `agent_settled`, the request
+carries that run's hop count (see [Hop limit](#hop-limit)), so two models that
+delegate to each other through an extension cannot escape the limit. While the
+session is idle it carries 0, as the example below does. The provider never
+refuses a send for its hop count; the receiving session refuses past the limit
+as a loop.
 
 The request's `id` is what a reply names in its `in_reply_to`, so a consumer
 that wants its answers back should keep it.
@@ -383,6 +398,27 @@ const probe = {};
 bareBus.emit("message:scan", probe);
 assert.equal(probe.scanned, undefined);
 ```
+
+## Compatibility
+
+Sessions running older and newer copies of `pi-session-mail` share one mail
+root, and other extensions depend on its hooks, so these are stable:
+
+- The three hooks, `message:send`, `message:inbound` and `message:scan`, and
+  their payloads.
+- The `[mailbox] From …` label and the `[mailbox] End of the mail …` line that
+  frame injected mail.
+- The mail root path, `$XDG_STATE_HOME/pi-session-mail/`, or
+  `~/.local/state/pi-session-mail/` when `XDG_STATE_HOME` is unset or not
+  absolute.
+- The envelope fields, the kinds (`request`, `reply`, `message`, `ask`) and the
+  statuses (`done`, `stopped`, `failed`).
+- The names of the tools (`session_mail_list`, `session_mail_send`,
+  `session_mail_ask`, `session_mail_reply`) and of the `/mailbox` command.
+- The keys of `session-mail.json`.
+
+Changing any of them needs a major version from 1.0 on, and a minor version
+while the package is at 0.x.
 
 ## More
 

@@ -174,6 +174,8 @@ const isHops = (value: unknown): value is number => typeof value === "number" &&
  * Parse an envelope file; throws when it is not a well-formed envelope from a
  * valid address. An envelope written before `kind` and `hops` existed is read
  * as a reply when it answers something and as a request otherwise, with hops 0.
+ * A `kind` this version does not know is read as `message`, so mail from a
+ * newer copy is delivered rather than stranded; the original value is dropped.
  */
 export function readEnvelope(path: string): Envelope {
 	const value = JSON.parse(readFileSync(path, "utf8")) as Partial<Envelope>;
@@ -186,7 +188,7 @@ export function readEnvelope(path: string): Envelope {
 		throw new Error(`in_reply_to names more than ${MAX_REPLY_IDS} requests`);
 	if (typeof value.body !== "string") throw new Error("missing body");
 	if (value.kind === undefined) value.kind = value.in_reply_to.length > 0 ? "reply" : "request";
-	else if (!KINDS.includes(value.kind)) throw new Error(`invalid kind ${JSON.stringify(value.kind)}`);
+	else if (!KINDS.includes(value.kind)) value.kind = "message";
 	if (value.hops === undefined) value.hops = 0;
 	else if (!isHops(value.hops)) throw new Error(`invalid hops ${JSON.stringify(value.hops)}`);
 	return value as Envelope;

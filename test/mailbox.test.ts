@@ -462,20 +462,112 @@ test("an envelope written before kind and hops is read as a request or a reply b
 	assert.deepEqual(b.warnings, []);
 });
 
-test("an envelope with an unknown kind or a bad hop count is set aside with a warning", async () => {
+test("an envelope with a bad hop count is set aside with a warning", async () => {
 	const b = session(newId("b"));
 	const a = newId("a");
 	mkdirSync(box(b.id, "new"), { recursive: true, mode: 0o700 });
 	const bad = (id: string, extra: object) =>
 		JSON.stringify({ id, from: a, to: b.id, in_reply_to: [], status: "", ts: "", body: "x", ...extra });
-	writeFileSync(join(box(b.id, "new"), "000000000000001-k.json"), bad("k", { kind: "shout", hops: 0 }));
 	writeFileSync(join(box(b.id, "new"), "000000000000002-h.json"), bad("h", { kind: "request", hops: -1 }));
 	await b.start();
 	await b.shutdown();
 	assert.equal(b.sent.length, 0);
-	assert.equal(b.warnings.length, 2);
-	assert.match(b.warnings[0], /invalid kind "shout"/);
-	assert.match(b.warnings[1], /invalid hops -1/);
+	assert.equal(b.warnings.length, 1);
+	assert.match(b.warnings[0], /invalid hops -1/);
+});
+
+test("an envelope with an unknown kind is delivered as a message, waking the session and expecting no answer", async () => {
+	const b = session(newId("b"));
+	const a = newId("a");
+	mkdirSync(box(b.id, "new"), { recursive: true, mode: 0o700 });
+	writeFileSync(
+		join(box(b.id, "new"), "000000000000001-k.json"),
+		JSON.stringify({
+			id: "k",
+			from: a,
+			to: b.id,
+			in_reply_to: [],
+			status: "",
+			ts: "",
+			body: "from the future",
+			kind: "shout",
+			hops: 0,
+		}),
+	);
+	const seen: { envelope: { kind: string } }[] = [];
+	b.events.on("message:inbound", (p) => void seen.push(p as (typeof seen)[number]));
+	await b.start();
+	assert.equal(b.sent.length, 1);
+	assert.match(b.sent[0].message.content, /from the future/);
+	assert.match(b.sent[0].message.content, /expects no answer/);
+	assert.deepEqual(
+		seen.map((p) => p.envelope.kind),
+		["message"],
+	);
+	await b.answer("done");
+	await b.shutdown();
+	assert.deepEqual(files(a, "new"), []);
+	assert.deepEqual(b.warnings, []);
+});
+
+test("a message:send emitted during a run carries the run's hops and is refused past the limit as a loop", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.start();
+	await a.agentStart();
+	mkdirSync(box(a.id, "new"), { recursive: true, mode: 0o700 });
+	writeFileSync(
+		join(box(a.id, "new"), "000000000000001-p.json"),
+		JSON.stringify({
+			id: "p",
+			from: newId(),
+			to: a.id,
+			in_reply_to: [],
+			status: "",
+			ts: "",
+			body: "hop 4",
+			kind: "message",
+			hops: 4,
+		}),
+	);
+	await until(() => a.sent.length === 1, "the message to be injected");
+	const payload: SendPayload = { to: b.id, body: "continue the chain" };
+	a.events.emit("message:send", payload);
+	assert.equal(payload.error, undefined);
+	assert.equal(payload.envelope?.hops, 5);
+	assert.equal(payload.envelope?.kind, "request");
+	await b.start();
+	await b.agentStart();
+	await until(() => b.sent.length === 1, "the request to be injected");
+	await assert.rejects(b.toolCall("session_mail_send", { to: newId(), message: "again" }), /hop limit of 5/);
+	await a.shutdown();
+	await b.shutdown();
+});
+
+test("a message:send emitted while idle carries hops 0 even when mail raised the count", async () => {
+	const a = session(newId("a"));
+	const b = newId("b");
+	mkdirSync(box(a.id, "new"), { recursive: true, mode: 0o700 });
+	writeFileSync(
+		join(box(a.id, "new"), "000000000000001-p.json"),
+		JSON.stringify({
+			id: "p",
+			from: newId(),
+			to: a.id,
+			in_reply_to: [],
+			status: "",
+			ts: "",
+			body: "hop 3",
+			kind: "message",
+			hops: 3,
+		}),
+	);
+	await a.start();
+	assert.equal(a.sent.length, 1); // woke the idle session, which has not started its run yet
+	const payload: SendPayload = { to: b, body: "from the user" };
+	a.events.emit("message:send", payload);
+	assert.equal(payload.envelope?.hops, 0);
+	await a.shutdown();
 });
 
 test("an envelope with an invalid from gets no reply", async () => {
@@ -814,7 +906,12 @@ test("a sent/ file whose name matches but whose envelope id differs is not quote
 // ---------------------------------------------------------------------------
 // pi.events interface
 
-type SendPayload = { to: unknown; body: unknown; envelope?: { id: string; to: string; from: string }; error?: string };
+type SendPayload = {
+	to: unknown;
+	body: unknown;
+	envelope?: { id: string; to: string; from: string; kind: string; hops: number };
+	error?: string;
+};
 
 test("message:send leaves the written envelope on the payload by the time emit returns", async () => {
 	const a = session(newId("a"));

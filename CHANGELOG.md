@@ -20,6 +20,14 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Contract change:** a `message:send` emitted during a run now carries that
+  run's hop count instead of 0, so two models delegating to each other through
+  an extension no longer escape the hop limit. Emitted while idle it still
+  carries 0. It is never refused at send time; the receiving side refuses
+  past the limit as a loop, as before.
+- An envelope with a `kind` this version does not know is read as `message`:
+  it is delivered, wakes the session and expects no answer. The original value
+  is not kept. Before, it was set aside with a warning.
 - Envelopes, in `new/` and in `sent/`, are written with mode `0600`; they were
   `0644` under the usual umask.
 - A mail root that already existed with looser permissions is set to `0700` at
