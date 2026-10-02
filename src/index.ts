@@ -27,6 +27,7 @@ import { type FSWatcher, watch } from "node:fs";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { label, listRunning, removeRecord, resolveTo, type State, writeRecord } from "./running.ts";
+import { type SettleInput, settle } from "./settle.ts";
 import {
 	boxPath,
 	claim,
@@ -50,20 +51,6 @@ const POLL_MS = 1000;
 const BODY_CAP = 32 * 1024;
 /** Each request quoted in a reply is cut at this many UTF-8 bytes. */
 const QUOTE_CAP = 2 * 1024;
-/** Reply body when the run ended with no assistant text. */
-const NO_ANSWER = "(The session settled with no answer text.)";
-/** Reply body of a run the user stopped, with any partial answer text after it. */
-const STOPPED = "(The user stopped this run before it finished; the text that follows, if any, is partial.)";
-/** Opening line of the reply body to a request held across a stop, before the answer of the run that completed it. */
-const TOOK_OVER =
-	"(The user stopped an earlier run partway and took over; the answer that follows is from the run that completed after that.)";
-/** Opening line of the reply body of a run that ended on an error. */
-const ERRORED = (error: string) =>
-	`(The run ended on an error before it finished: ${error}. The text that follows, if any, is partial.)`;
-/** Body of a `failed` reply to requests that never entered the conversation. */
-const UNSEEN =
-	"(The session was stopped before it read the message. Nothing was done; send it again if it is still needed.)";
-
 /** Cut `text` to at most `max` UTF-8 bytes on a character boundary; undefined when it already fits. */
 function cap(text: string, max: number): string | undefined {
 	const bytes = Buffer.from(text, "utf8");
@@ -499,52 +486,19 @@ export default function mailbox(pi: ExtensionAPI) {
 	// queued follow-up after `agent_end` would otherwise get a premature answer.
 	pi.on("agent_settled", async () => {
 		const me = address;
-		// A stopped or errored run notes how it ended, then gives what it had.
-		const opening = lastAborted ? STOPPED : lastError !== undefined ? ERRORED(lastError) : undefined;
-		const body =
-			opening === undefined
-				? (lastAnswer ?? NO_ANSWER)
-				: lastAnswer === undefined
-					? opening
-					: `${opening}\n\n${lastAnswer}`;
-		const status = lastAborted ? "stopped" : lastError !== undefined ? "failed" : "done";
-		// A request held across a stop is answered by the run that completes it, saying the user took over.
-		const tookOverBody = `${TOOK_OVER}\n\n${lastAnswer ?? NO_ANSWER}`;
 		// Answers carry the settled turn's count; the next turn counts afresh.
 		const answerHops = hops;
 		hops = 0;
-		// A request the user stopped a run on is the user's to finish, not an
-		// answer yet: it stays owed, through stops and failed runs alike, until a
-		// run completes. Asks are never held; their asker is blocked waiting.
-		const requests = [...owed];
-		const asks = [...owedAsks];
-		const read = seen;
-		const wasHeld = held;
-		owed = new Map();
+		const end: SettleInput["end"] = lastAborted
+			? { kind: "stopped" }
+			: lastError !== undefined
+				? { kind: "failed", error: lastError }
+				: { kind: "done" };
+		const decision = settle({ requests: owed, asks: owedAsks, seen, held, end, answer: lastAnswer });
+		owed = decision.owed;
+		held = decision.held;
 		owedAsks = new Map();
 		seen = new Set();
-		held = new Set();
-		const replies: { to: string; ids: string[]; body: string; status: Envelope["status"] }[] = [];
-		for (const [to, ids] of requests) {
-			const unseen = ids.filter((id) => !read.has(id) && !wasHeld.has(id));
-			const keep = ids.filter(
-				(id) => !unseen.includes(id) && (lastAborted || (lastError !== undefined && wasHeld.has(id))),
-			);
-			const answer = ids.filter((id) => !unseen.includes(id) && !keep.includes(id));
-			if (keep.length > 0) owed.set(to, keep);
-			for (const id of keep) held.add(id);
-			const plain = answer.filter((id) => !wasHeld.has(id));
-			const tookOver = answer.filter((id) => wasHeld.has(id));
-			if (plain.length > 0) replies.push({ to, ids: plain, body, status });
-			if (tookOver.length > 0) replies.push({ to, ids: tookOver, body: tookOverBody, status: "done" });
-			if (unseen.length > 0) replies.push({ to, ids: unseen, body: UNSEEN, status: "failed" });
-		}
-		for (const [to, ids] of asks) {
-			const done = ids.filter((id) => read.has(id));
-			const failed = ids.filter((id) => !read.has(id));
-			if (done.length > 0) replies.push({ to, ids: done, body, status });
-			if (failed.length > 0) replies.push({ to, ids: failed, body: UNSEEN, status: "failed" });
-		}
 		lastAnswer = undefined;
 		lastAborted = false;
 		lastError = undefined;
@@ -552,7 +506,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		state = "idle";
 		announce();
 		if (me === undefined) return;
-		for (const reply of replies) {
+		for (const reply of decision.replies) {
 			const { to } = reply;
 			try {
 				// Answers are never refused by the hop limit.
