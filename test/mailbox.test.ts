@@ -40,6 +40,20 @@ test("/mailbox with no arguments shows the session's address", async () => {
 	assert.match(a.notes[0], new RegExp(a.id));
 });
 
+test("/mailbox refuses every form while the mailbox is off", async () => {
+	const target = session(newId());
+	await target.start();
+	const a = session("../not-an-address");
+	await a.start();
+	assert.match(a.warnings[0], /is not a usable address; the mailbox is off$/);
+	for (const args of ["", `${target.id} hello`, "prune"]) await a.mailbox(args);
+	assert.deepEqual(a.notes, []);
+	assert.deepEqual(a.errors, Array(3).fill("mailbox: this session has no mailbox address; the mailbox is off"));
+	assert.equal(envelopes(target.id, "new").length + envelopes(target.id, "cur").length, 0);
+	await a.shutdown();
+	await target.shutdown();
+});
+
 test("/mailbox <address> <text> writes a request to the recipient's new/ and the sender's sent/", async () => {
 	const a = session(newId("a"));
 	const b = newId("b");

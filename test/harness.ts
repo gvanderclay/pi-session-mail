@@ -107,7 +107,9 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 		},
 	};
 	register(pi as never);
+	let started = false;
 	const fire = async (event: string, payload: object = {}) => {
+		if (event === "session_start") started = true;
 		for (const h of handlers[event] ?? []) await h({ type: event, ...payload }, ctx);
 	};
 	let calls = 0;
@@ -133,7 +135,11 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 		drop: (on: boolean) => {
 			dropping = on;
 		},
-		mailbox: (args: string) => commands.mailbox(args, ctx),
+		/** Run `/mailbox args`; Pi starts a session before any command, so a session not yet started starts first. */
+		mailbox: async (args: string) => {
+			if (!started) await fire("session_start", { reason: "startup" });
+			return commands.mailbox(args, ctx);
+		},
 		/** Rename the session, as `/name` does, and tell the extension. */
 		setName: (next: string | undefined) => {
 			name = next;

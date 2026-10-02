@@ -610,7 +610,11 @@ export default function mailbox(pi: ExtensionAPI) {
 		description:
 			"Show this session's mailbox address and name, send a request: /mailbox <name or id> <text>, or remove closed sessions' empty mailbox folders: /mailbox prune",
 		handler: async (args, context) => {
-			const me = context.sessionManager.getSessionId();
+			const me = address;
+			if (me === undefined) {
+				context.ui.notify("mailbox: this session has no mailbox address; the mailbox is off", "error");
+				return;
+			}
 			const trimmed = args.trim();
 			if (trimmed === "") {
 				const current = context.sessionManager.getSessionName?.() || undefined;
