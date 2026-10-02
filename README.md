@@ -1,47 +1,102 @@
 # pi-session-mail
 
-A file mailbox between Pi sessions on the same machine, with a `/mailbox`
-command and `session_mail_*` tools.
+A file mailbox between Pi sessions on the same machine.
 
-Every session has an address — its session id — and an inbox under
+Each Pi session gets an address and an inbox. You send a request to another
+running session with `/mailbox`, and the model lists, asks, answers and sends
+through four `session_mail_*` tools. Mail waits on disk until the recipient
+starts or resumes, and the recipient's final answer goes back to the sender
+automatically.
+
+## Install
+
+You need Pi and a writable state directory. Pi supplies the peer dependencies
+`typebox` (the tools' parameter schemas) and `@earendil-works/pi-coding-agent`
+(the extension types, and `getAgentDir`, which finds `session-mail.json`). The
+extension calls `pi.events`, `pi.sendMessage`, `pi.on`, `pi.registerCommand`
+and `pi.registerTool`, so your Pi must provide them. The package has no
+runtime dependencies and no build step.
+
+Install the package from npm:
+
+```bash
+pi install npm:pi-session-mail
+```
+
+To follow the latest commit instead, install it from GitHub:
+
+```bash
+pi install git:github.com/gvanderclay/pi-session-mail
+```
+
+## First use
+
+In a Pi session, show its address and name:
+
+```text
+/mailbox
+```
+
+The session's id is its address. Other sessions see its Pi session name (set it
+with `/name`), or the first 8 characters of its id when it has none.
+
+In another session, send a request to that name or to an id prefix of at least
+8 characters:
+
+```text
+/mailbox <to> <text>
+```
+
+The sender sees `Sent <id> to <address>`. The recipient's model receives the
+text and works on it, and its last answer comes back to the sender as a reply
+when that run settles. [Addressing](#addressing) lists how `<to>` resolves.
+
+The footer shows `✉ N pending · N read · N awaiting`, non-zero counts only.
+`awaiting` counts requests with no answer yet, never messages.
+
+## How mail works
+
+Every session has an address, its session id, and an inbox under
 `<mail root>/<address>/{tmp,new,cur,sent}/`. The mail root is
 `$XDG_STATE_HOME/pi-session-mail/`, or `~/.local/state/pi-session-mail/` when
 `XDG_STATE_HOME` is unset or not an absolute path. It is created owner-only
-(mode `0700`) and shared by every Pi agent directory on the machine, so sessions in
-different agent directories reach each other. `/mailbox` shows this session's
-address and name, and `/mailbox <to> <text>` sends a request, with `to`
-resolved as described under [Addressing](#addressing). Mail waits
-on disk until a session with that address starts or resumes; a running session
-claims it into `cur/` and injects it once, with the body cut at 32 KiB plus
-the envelope's path (see [Delivery](#delivery)). A reply also quotes each
-request it answers, capped at 2 KiB each with the `sent/` copy's path, or the
-request's id alone when this session has no copy.
+(mode `0700`) and shared by every Pi agent directory on the machine, so
+sessions in different agent directories reach each other. It is safe to delete
+while no session is running.
+
+Mail waits on disk until a session with that address starts or resumes. A
+running session claims it into `cur/` and injects it once, with the body cut at
+32 KiB plus the envelope's path (see [Delivery](#delivery)). A reply also
+quotes each request it answers, capped at 2 KiB each with the `sent/` copy's
+path, or the request's id alone when this session has no copy.
 
 When the recipient's agent settles, its last answer goes back to each sender as
-one reply listing the requests it answers, and as a separate reply to each
-sender's asks not already answered with `session_mail_reply`: `done`
-normally, `stopped` when the user stopped the run, with the partial text, or
-`failed` when the run ended on an error, with the error and the partial text.
-A request is never answered `stopped`: when the user stops a run, the
-requests it read are held for the next run that completes, which answers them
-`done`, saying the user took over (see [Delivery](#delivery)). A request the
-session was stopped before reading gets a `failed` reply instead. Replies and
-messages are never answered. The answer to an ask its sender is still waiting
-on becomes that sender's `session_mail_ask` result.
-The footer shows `✉ N pending · N read · N awaiting`, non-zero counts only;
-`awaiting` counts requests with no answer yet, never messages.
+one reply listing the requests it answers. Each of the sender's asks not
+already answered with `session_mail_reply` gets a separate reply. The status is
+`done` normally, `stopped` when the user stopped the run (with the partial
+text), or `failed` when the run ended on an error (with the error and the
+partial text).
+
+A request is never answered `stopped`. When the user stops a run, the requests
+it read are held for the next run that completes, which answers them `done` and
+says the user took over (see [Delivery](#delivery)). A request the session was
+stopped before reading gets a `failed` reply instead. Replies and messages are
+never answered. The answer to an ask its sender is still waiting on becomes
+that sender's `session_mail_ask` result.
 
 ## Running sessions
 
-At session start each session writes a record to `<mail root>/running/<address>.json`
-(owner-only): its address, Pi session name (when one is set), working
-directory, process id, `idle` or `busy`, `waitingOn` (the address its waiting
-ask waits on, or empty), and `updated`, when the record
-last changed. The record is rewritten when the session is renamed
-(`session_info_changed`), when a run starts (`busy`) and when it settles
-(`idle`), when an ask starts or stops waiting, and removed at `session_shutdown`. A record whose process no longer
-exists counts as not running, and whoever reads it deletes it; so does a
-session left behind by a crash.
+At session start each session writes an owner-only record to
+`<mail root>/running/<address>.json`. It holds the session's address, Pi
+session name (when one is set), working directory, process id, `idle` or `busy`
+state, `waitingOn` (the address its waiting ask waits on, or empty), and
+`updated`, when the record last changed.
+
+The record is rewritten when the session is renamed (`session_info_changed`),
+when a run starts (`busy`) and when it settles (`idle`), and when an ask starts
+or stops waiting. It is removed at `session_shutdown`. A record whose process
+no longer exists counts as not running, and whoever reads it deletes it, so a
+session left behind by a crash is cleaned up too.
 
 The model gets four tools:
 
@@ -80,29 +135,32 @@ A `to`, typed after `/mailbox` or given to a tool, resolves as follows:
 Mail for the model wakes an idle session, and reaches a busy one at its next
 gap between tool calls rather than after the run. It is never held back while
 the user has input queued. A reply starts no turn: it is shown in an idle
-session and the model sees it with the next message, unless a
-`message:inbound` listener takes it over, as `delegate` does for its tasks.
+session and the model sees it with the next message, unless a `message:inbound`
+listener takes it over, as pi-squire's `delegate` does for its tasks.
+
 A reply to this session's waiting ask goes to the waiting tool call as its
 result: it is neither injected nor emitted on `message:inbound`. A reply to an
 ask that is no longer waiting (it timed out, the user stopped it, or the
-session restarted) is delivered like a message: it starts a turn, and its
-label says the ask stopped waiting.
+session restarted) is delivered like a message: it starts a turn, and its label
+says the ask stopped waiting.
 
-Every injected message opens with a neutral label in the style of
-`pi-intercom`: `[mailbox] From <name> (<full id>, working in <cwd>), another
-Pi session on this machine.`, with the short id standing in for a missing
-name and the working directory left out when the sender is not running. It
-carries no distrust wording; with a "not from the user" warning, models
-refused every request from a peer as a possible injection. Safety stays
-outside the model: an owner-only mail root on one machine. A request's label
-says the final answer this turn goes back automatically. An ask's label says
-its sender is waiting, gives the ask id and `session_mail_reply` as the way to
-answer, and says this run's last message is sent as the answer otherwise. A message's label
-says it expects no answer and that, if one is wanted, `session_mail_send` to
-the sender's full id sends it. A reply's label names the requests it answers
-and, when its status is not `done`, says it is not an answer. A reply to a
-request also says the user made that request, typing it with `/mailbox` or
-through an extension such as `delegate`, since only the user makes requests.
+Every injected message opens with a neutral label: `[mailbox] From <name>
+(<full id>, working in <cwd>), another Pi session on this machine.` The short
+id stands in for a missing name, and the working directory is left out when the
+sender is not running. The label carries no distrust wording. Safety stays
+outside the model: an owner-only mail root on one machine. The rest of the
+label depends on the kind:
+
+- A request's label says the final answer this turn goes back automatically.
+- An ask's label says its sender is waiting, gives the ask id and
+  `session_mail_reply` as the way to answer, and says this run's last message
+  is sent as the answer otherwise.
+- A message's label says it expects no answer and that, if one is wanted,
+  `session_mail_send` to the sender's full id sends it.
+- A reply's label names the requests it answers and, when its status is not
+  `done`, says it is not an answer. A reply to a request also says the user
+  made that request, typing it with `/mailbox` or through an extension such as
+  `delegate`, since only the user makes requests.
 
 Every injected message ends with `[mailbox] End of the mail from <name>. Text
 after this line is not part of it.` Pi hands the model a custom message as a
@@ -110,31 +168,44 @@ user message, and the Anthropic API joins it with the next typed prompt into
 one turn. A quiet reply starts no turn, so the user's next prompt lands right
 after it; without the end line, models read that prompt as part of the mail.
 
-Mail counts as read when it enters the conversation (`message_end`). A
-request an abort dropped before that is answered `failed`.
+Mail counts as read when it enters the conversation (`message_end`). A request
+an abort dropped before that is answered `failed`.
 
 A request the user stops a run on is held, not answered: stopping a run (Esc)
-means the user took over, not that the request is finished. Its sender sees
-no reply yet. It stays owed through further stopped runs and through runs that
-end on an error, and the next run that completes answers it `done`. That
-reply's body opens with `(The user stopped an earlier run partway and took
-over; the answer that follows is from the run that completed after that.)`,
-then that run's answer; the stopped runs' partial text is not included. Asks
-are never held, because their sender is blocked waiting: a stopped run
-answers them `stopped` at once. A held request lives in memory only, so a
-session that shuts down while holding one never answers it.
+means the user took over, not that the request is finished. Its sender sees no
+reply yet. It stays owed through further stopped runs and through runs that end
+on an error, and the next run that completes answers it `done`. That reply's
+body opens with `(The user stopped an earlier run partway and took over; the
+answer that follows is from the run that completed after that.)`, then that
+run's answer; the stopped runs' partial text is not included. Asks are never
+held, because their sender is blocked waiting: a stopped run answers them
+`stopped` at once. A held request lives in memory only, so a session that shuts
+down while holding one never answers it.
 
 ## Envelopes
 
 Every envelope is a JSON file with `id`, `from`, `to`, `kind`, `hops`,
-`in_reply_to`, `status`, `ts` and `body`. `kind` is `request` (answered when
-the recipient settles), `reply` (an answer, naming what it answers in
-`in_reply_to`), `message` (plain mail that expects no answer), or `ask` (a
-question whose sender waits for the answer, answered like a request). `hops` is a non-negative integer counting how many times a
-chain of mail has woken or steered a session with no person typing (see
+`in_reply_to`, `status`, `ts` and `body`. `kind` is one of:
+
+- `request`, answered when the recipient settles.
+- `reply`, an answer that names what it answers in `in_reply_to`.
+- `message`, plain mail that expects no answer.
+- `ask`, a question whose sender waits for the answer, answered like a request.
+
+`hops` is a non-negative integer counting how many times a chain of mail has
+woken or steered a session with no person typing (see
 [Hop limit](#hop-limit)). An envelope written before `kind` and `hops` existed
-is read as a reply when `in_reply_to` is non-empty and as a request
-otherwise, with hops 0.
+is read as a reply when `in_reply_to` is non-empty and as a request otherwise,
+with hops 0.
+
+A reply's `status` says how the run ended, not whether the job succeeded.
+Requests, asks and messages carry no status.
+
+| `status` | Meaning |
+| --- | --- |
+| `done` | the run settled; the body is its answer, opening with a note that the user took over when the request was held across a stop |
+| `stopped` | the user stopped the run before it settled; the body says so, then the partial text. Only asks are answered `stopped`; requests are held instead |
+| `failed` | the run did not do the job, and the body says why: either the run ended on an error (such as an API error Pi's retries gave up on), and the body gives the error, then the partial text; or the session was stopped before it read the request or ask, and nothing was done |
 
 ## Hop limit
 
@@ -147,49 +218,13 @@ quietly starts no turn and does not count. The count starts afresh when the
 run settles.
 
 `session_mail_send` and `session_mail_ask` stamp the count on their mail, and
-are refused before anything is written once the count has reached the limit
-(5 unless `session-mail.json` says otherwise; see
-[Configuration](#configuration)). The
-refusal says that a person typing in either session starts the count again.
-Automatic answers carry the count and are never refused. Requests from
-`/mailbox` and `message:send` carry 0 and are never refused: their senders act
-for the user. The limit is a loop guard, not a security boundary: a
-hand-written envelope can claim any `hops`.
-
-Other extensions integrate through the `pi.events` hooks below. They never
-import this package or read its files.
-
-## Install
-
-Install the package from npm:
-
-```bash
-pi install npm:pi-session-mail
-```
-
-To follow the latest commit instead, install it from GitHub:
-
-```bash
-pi install git:github.com/gvanderclay/pi-session-mail
-```
-
-The package has no runtime dependencies and no build step. The `pi` manifest loads only
-`./index.ts`, and the tests under `test/` are neither loaded by Pi nor included
-in the npm tarball.
-Run them with `pnpm install && pnpm test`.
-
-## Requirements
-
-- Pi, with `pi.events`, `pi.sendMessage`, `pi.on`, `pi.registerCommand` and
-  `pi.registerTool`.
-- `typebox` for the tools' parameter schemas, a host-provided package
-  declared as a peer dependency and supplied by Pi.
-- `@earendil-works/pi-coding-agent` for the extension types, `getAgentDir`
-  (to find `session-mail.json`) and the test harness's event bus, declared as
-  a peer dependency and supplied by Pi.
-- A writable state directory. The mail root lives under
-  `$XDG_STATE_HOME/pi-session-mail/` (see above) and is safe to delete while
-  no session is running.
+are refused before anything is written once the count has reached the limit (5
+unless `session-mail.json` says otherwise; see
+[Configuration](#configuration)). The refusal says that a person typing in
+either session starts the count again. Automatic answers carry the count and
+are never refused. Requests from `/mailbox` and `message:send` carry 0 and are
+never refused: their senders act for the user. The limit is a loop guard, not a
+security boundary: a hand-written envelope can claim any `hops`.
 
 ## Configuration
 
@@ -205,32 +240,22 @@ Run them with `pnpm install && pnpm test`.
 | --- | --- |
 | `hopLimit` | A positive integer: how many hops a chain of sessions waking each other may reach before `session_mail_send` and `session_mail_ask` are refused. Default 5. |
 
-The file is read at each send. A missing file, or one without `hopLimit`,
-means 5. An unreadable or invalid file also means 5, with one warning per
-session. `pi-session-mail` sets no environment variable of its own and reads one
-standard one:
+The file is read at each send. A missing file, or one without `hopLimit`, means
+5. An unreadable or invalid file also means 5, with one warning per session.
 
-| Variable | Effect |
-| --- | --- |
-| `XDG_STATE_HOME` | The mail root is `$XDG_STATE_HOME/pi-session-mail/` when this is an absolute path, and `~/.local/state/pi-session-mail/` otherwise. Read at every call. |
-
-## Statuses
-
-A reply's `status` says how the run ended, not whether the job succeeded.
-Requests, asks and messages carry no status.
-
-| `status` | Meaning |
-| --- | --- |
-| `done` | the run settled; the body is its answer, opening with a note that the user took over when the request was held across a stop |
-| `stopped` | the user stopped the run before it settled; the body says so, then the partial text. Only asks are answered `stopped`; requests are held instead |
-| `failed` | the run did not do the job, and the body says why: either the run ended on an error (such as an API error Pi's retries gave up on), and the body gives the error, then the partial text; or the session was stopped before it read the request or ask, and nothing was done |
+The only environment variable it reads is the standard `XDG_STATE_HOME`, at
+every call, to place the mail root (see [How mail works](#how-mail-works)). It
+sets no environment variable of its own.
 
 ## Hooks
 
-`pi-session-mail` provides all three hooks below and consumes none. All are `pi.events`
-channels, and all depend on listeners doing all their work
-**synchronously**: the emitter reads the results off the payload the moment
-`emit` returns, so a listener must finish before its first `await`.
+Other extensions integrate through the `pi.events` hooks below. They never
+import this package or read its files.
+
+`pi-session-mail` provides all three hooks and consumes none. All three depend
+on listeners doing all their work **synchronously**: the emitter reads the
+results off the payload the moment `emit` returns, so a listener must finish
+before its first `await`.
 
 The `js` blocks below are the contract's worked examples, and
 `test/hooks.test.ts` extracts and runs them verbatim, one per block, on a real
@@ -244,8 +269,9 @@ runs that block.
 
 The consumer emits `{ to, body }`. Consumers send on the user's behalf: a
 command the user typed, or a tool whose call the user started. A provider
-writes a request (`kind: "request"`, `hops: 0`) from its own session's address and sets `envelope` on the same object before `emit`
-returns, or sets `error` instead. **If neither is set, no provider is
+writes a request (`kind: "request"`, `hops: 0`) from its own session's address
+and sets `envelope` on the same object before `emit` returns, or sets `error`
+instead. **If neither is set, no provider is
 installed**, and the consumer should refuse rather than pretend the message
 was sent.
 
@@ -281,15 +307,16 @@ assert.equal(probe.error, undefined);
 
 ### `message:inbound`
 
-`pi-session-mail` emits this for every claimed envelope before injecting it, requests,
-messages and replies alike.
+`pi-session-mail` emits this for every claimed envelope before injecting it,
+requests, messages and replies alike.
 
-`pi-session-mail` never emits it from inside a `session_start` handler. Mail waiting
-when a session starts is claimed on a later event-loop turn (`setImmediate`),
-so a listener that rebuilds its state synchronously in its own `session_start`
-sees that mail, whether it loads before or after `pi-session-mail`. The one exception
-is an extension loaded between the two whose `session_start` waits on I/O:
-the claim can then run before the listener's handler. The watcher and the poll timer deliver later mail as usual.
+`pi-session-mail` never emits it from inside a `session_start` handler. Mail
+waiting when a session starts is claimed on a later event-loop turn
+(`setImmediate`), so a listener that rebuilds its state synchronously in its
+own `session_start` sees that mail, whether it loads before or after
+`pi-session-mail`. The one exception is an extension loaded between the two
+whose `session_start` waits on I/O: the claim can then run before the
+listener's handler. The watcher and the poll timer deliver later mail as usual.
 
 | Field | Meaning |
 | --- | --- |
@@ -301,8 +328,8 @@ the claim can then run before the listener's handler. The watcher and the poll t
 A listener that sets `handled` owns the display, and chooses whether its own
 message starts a turn (`triggerTurn`). A request a listener handled still
 arms this session's reply and counts as read, so a takeover never leaves a
-sender without an answer. A reply `pi-session-mail` injects itself quotes each request
-the same way, capped at 2 KiB with the copy's path.
+sender without an answer. A reply `pi-session-mail` injects itself quotes each
+request the same way, capped at 2 KiB with the copy's path.
 
 ```js message:inbound
 // Take over replies to requests this extension sent; `pi-session-mail` still shows
@@ -326,8 +353,8 @@ pi.events.on("message:inbound", (payload) => {
 
 ### `message:scan`
 
-A consumer emits `{}` to have `pi-session-mail` claim the mail waiting in its inbox
-now, instead of at the next watcher event or poll. The listener runs the
+A consumer emits `{}` to have `pi-session-mail` claim the mail waiting in its
+inbox now, instead of at the next watcher event or poll. The listener runs the
 inbox scan synchronously, so every waiting envelope has been emitted as
 `message:inbound` (and delivered) by the time `emit` returns, and then sets
 `scanned` to `true`. **If `scanned` is not set, no provider is installed**,
@@ -337,8 +364,9 @@ and the consumer must not conclude that no reply is waiting.
 | --- | --- | --- |
 | `scanned` | provider | `true` once the scan has finished and its `message:inbound` events were emitted |
 
-`delegate` uses this before checking whether a delegate's window is gone, so
-a reply written just before the window closed is claimed first.
+The `delegate` tool in [pi-squire](https://github.com/gvanderclay/pi-squire)
+uses this before checking whether a delegate's window is gone, so a reply
+written just before the window closed is claimed first.
 
 ```js message:scan
 // Claim waiting mail now; a waiting reply reaches `message:inbound` listeners
@@ -355,3 +383,14 @@ const probe = {};
 bareBus.emit("message:scan", probe);
 assert.equal(probe.scanned, undefined);
 ```
+
+## More
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) explains how to set up, test and propose a
+  change.
+- [CHANGELOG.md](CHANGELOG.md) lists what changed in each release.
+- [SECURITY.md](SECURITY.md) explains how to report a security problem.
+
+## License
+
+[MIT](LICENSE)
