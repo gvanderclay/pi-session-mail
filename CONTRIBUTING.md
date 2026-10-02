@@ -22,7 +22,7 @@ merges. Pull requests are squashed, so the title becomes the commit message:
 say what changes for someone using pi-session-mail.
 
 - Add a user-visible change under `## [Unreleased]` in `CHANGELOG.md`. Leave
-  `version` alone.
+  `version` alone; releases set it.
 - The tests pin current behaviour. If your change makes one fail on purpose,
   update the test and say so in the pull request and in `CHANGELOG.md`.
 - The hook examples in `README.md` are the hook contract:
