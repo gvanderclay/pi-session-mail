@@ -340,8 +340,9 @@ function finishAside(aside: string, address: string): boolean {
 		return true;
 	}
 	ensureBoxes(address);
-	// `new/` first, so the mail is back before anything else is.
-	for (const box of ["new", "cur", "sent", "tmp"] as const)
+	// `new/` last: if a move fails part-way, `new/` still holds mail, so the next
+	// prune restores the rest instead of taking the folder for empty and removing it.
+	for (const box of ["cur", "sent", "tmp", "new"] as const)
 		for (const name of boxNames(aside, box) ?? [])
 			moveBack(join(aside, box, name), join(boxPath(address, box), name), address);
 	rmSync(aside, { recursive: true, force: true });

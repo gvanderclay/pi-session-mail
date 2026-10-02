@@ -14,14 +14,15 @@ follows [Semantic Versioning](https://semver.org/).
   older than `pruneAfterDays` days, 30 unless `session-mail.json` sets it. An
   invalid `pruneAfterDays` means 30, with a warning like `hopLimit`'s.
   Pruning a folder removes its read mail (`cur/`) and its sent copies
-  (`sent/`) as well. Unread mail, a running session's folder, this session's folder
-  and `running/` are never removed, nor is anything that is not a real
+  (`sent/`) as well. Unread mail, a running session's folder, this session's
+  folder and `running/` are never removed, nor is anything that is not a real
   folder named like an address. A folder is moved aside before it is removed,
   so mail that arrives at that moment is put back, not lost.
 - `/mailbox prune` removes every such folder at once, whatever its age, so a
   closed session with no unread mail loses its folder, `cur/` and `sent/`
-  included, even if it closed a minute ago. It says `Removed <N> mailbox folders of closed sessions`. `/mailbox prune
-  <text>` is still a message to a session named `prune`.
+  included, even if it closed a minute ago. It says
+  `Removed <N> mailbox folders of closed sessions`. `/mailbox prune <text>` is
+  still a message to a session named `prune`.
 - A running record holds `started`, a token for its process's start time. A
   record whose process id now belongs to a process that started at another
   time counts as not running, so a crashed session no longer stays listed once

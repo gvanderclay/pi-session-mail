@@ -1519,6 +1519,31 @@ test("a symlinked box in a leftover folder is not listed into the mail boxes", (
 		rmSync(join(stateRoot(), address), { recursive: true });
 	}));
 
+test("a restore that fails part-way keeps its new/ so the next prune restores the rest", { skip: root0 }, () =>
+	withFreshRoot(() => {
+		const address = newId();
+		const aside = join(stateRoot(), `.pruning.${address}.${newId()}`);
+		mkdirSync(join(aside, "new"), { recursive: true });
+		mkdirSync(join(aside, "cur"), { recursive: true });
+		writeFileSync(join(aside, "new", "000000000000007-unread.json"), "{}");
+		writeFileSync(join(aside, "cur", "000000000000008-read.json"), "{}");
+		for (const name of ["tmp", "new", "cur", "sent"]) mkdirSync(join(stateRoot(), address, name), { recursive: true });
+		const cur = join(stateRoot(), address, "cur");
+		chmodSync(cur, 0o500);
+		try {
+			assert.equal(pruneClosed({ own: address, isRunning: () => false }), 0);
+			assert.ok(existsSync(join(aside, "new", "000000000000007-unread.json")));
+		} finally {
+			chmodSync(cur, 0o700);
+		}
+		assert.equal(pruneClosed({ own: address, isRunning: () => false }), 0);
+		assert.ok(!existsSync(aside));
+		assert.deepEqual(files(address, "new"), ["000000000000007-unread.json"]);
+		assert.deepEqual(files(address, "cur"), ["000000000000008-read.json"]);
+		rmSync(join(stateRoot(), address), { recursive: true });
+	}),
+);
+
 test("a folder left aside by a crash is removed when its new/ is empty and restored when it is not", () =>
 	withFreshRoot(() => {
 		const empty = newId();
