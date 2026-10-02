@@ -40,7 +40,11 @@
 		"lint": "biome ci .",
 		"typecheck": "tsc -p .",
 		"test": "node --test test/*.test.ts",
-		"check": "pnpm lint && pnpm typecheck && pnpm test"
+		"check": "pnpm lint && pnpm typecheck && pnpm test",
+		"release": "node scripts/release.mjs"
+	},
+	"publishConfig": {
+		"access": "public"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*",

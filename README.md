@@ -161,14 +161,16 @@ import this package or read its files.
 
 ## Install
 
-```bash
-pi install git:github.com/gvanderclay/pi-session-mail
-```
-
-Once it is published, install it by name instead:
+Install the package from npm:
 
 ```bash
 pi install npm:pi-session-mail
+```
+
+To follow the latest commit instead, install it from GitHub:
+
+```bash
+pi install git:github.com/gvanderclay/pi-session-mail
 ```
 
 The package has no runtime dependencies and no build step. The `pi` manifest loads only
