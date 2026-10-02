@@ -54,8 +54,13 @@ export function boxPath(address: string, box: Box): string {
 /** Create the root and `address`'s boxes; the root is made or set owner-only, and so is every directory made here. */
 export function ensureBoxes(address: string): void {
 	mkdirSync(mailRoot(), { recursive: true, mode: 0o700 });
-	// mkdirSync leaves a directory that already exists as it was.
-	chmodSync(mailRoot(), 0o700);
+	// mkdirSync leaves a directory that already exists as it was. A root this
+	// user cannot chmod (another owner, a read-only mount) is used as it is.
+	try {
+		chmodSync(mailRoot(), 0o700);
+	} catch {
+		// best effort
+	}
 	for (const box of BOXES) mkdirSync(boxPath(address, box), { recursive: true, mode: 0o700 });
 }
 

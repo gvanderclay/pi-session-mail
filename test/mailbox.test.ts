@@ -4,7 +4,17 @@
 // `pi.events` traffic, statuses and notifications.
 
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -80,6 +90,29 @@ test("a mail root that already exists at 0755 is tightened to 0700 at session st
 		assert.equal(statSync(stateRoot()).mode & 0o777, 0o700);
 	} finally {
 		process.env.XDG_STATE_HOME = saved;
+	}
+});
+
+// A root this user cannot chmod (here a link to the root-owned, world-writable
+// /tmp) is used as it is, as before the tightening existed.
+test("a mail root that cannot be tightened still starts the mailbox", {
+	skip: process.getuid?.() === 0 || statSync("/tmp").uid === process.getuid?.(),
+}, async () => {
+	const saved = process.env.XDG_STATE_HOME;
+	const a = session(newId("a"));
+	const hadRunning = existsSync("/tmp/running");
+	try {
+		process.env.XDG_STATE_HOME = join(dir, "foreign-state");
+		mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
+		symlinkSync("/tmp", stateRoot());
+		await a.start();
+		assert.ok(existsSync(join("/tmp", a.id, "new")));
+		assert.ok(existsSync(join("/tmp", "running", `${a.id}.json`)));
+	} finally {
+		await a.shutdown();
+		process.env.XDG_STATE_HOME = saved;
+		rmSync(join("/tmp", a.id), { recursive: true, force: true });
+		if (!hadRunning) rmSync("/tmp/running", { recursive: true, force: true });
 	}
 });
 
