@@ -70,6 +70,13 @@ test("a session start writes a record, run state updates it, and shutdown remove
 	assert.equal(records().has(a.id), false);
 });
 
+test("a running session's record holds this process's start token", async () => {
+	const a = session(newId());
+	await a.start();
+	assert.equal(typeof (records().get(a.id) as { started?: unknown }).started, "string");
+	await a.shutdown();
+});
+
 test("the records directory and each record are owner-only", async () => {
 	const a = session(newId());
 	await a.start();
@@ -143,6 +150,29 @@ test("a record whose process is gone is left out of the list and deleted", async
 	assert.match(text, /^1 running session:/);
 	assert.ok(!text.includes("ghost"), text);
 	assert.equal(existsSync(path), false);
+	await a.shutdown();
+});
+
+test("a record with this process's pid but another start token is not listed and is deleted", async () => {
+	const a = session(newId());
+	await a.start();
+	const reused = newId();
+	const path = plantRecord(reused, { pid: process.pid, name: "reused", started: "not-this-process" });
+	const text = (await a.toolCall("session_mail_list")).content[0].text;
+	assert.match(text, /^1 running session:/);
+	assert.ok(!text.includes("reused"), text);
+	assert.equal(existsSync(path), false);
+	await a.shutdown();
+});
+
+test("a record with no start token is judged by its pid alone", async () => {
+	const a = session(newId());
+	await a.start();
+	const old = newId();
+	plantRecord(old, { pid: process.pid, name: "old" });
+	const text = (await a.toolCall("session_mail_list")).content[0].text;
+	assert.match(text, /^2 running sessions:/);
+	assert.ok(text.includes("- old\n"), text);
 	await a.shutdown();
 });
 

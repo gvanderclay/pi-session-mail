@@ -8,6 +8,12 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- A running record holds `started`, a token for its process's start time. A
+  record whose process id now belongs to a process that started at another
+  time counts as not running, so a crashed session no longer stays listed once
+  the operating system reuses its process id. Records without `started`
+  (written by 0.1.0), and platforms where the start time cannot be read, are
+  still judged by process id alone.
 - The README states the minimum Pi version: 0.80.4 or later, tested with 1.0.0.
 - Private vulnerability reporting is enabled, so the advisory form linked from
   `SECURITY.md` works.

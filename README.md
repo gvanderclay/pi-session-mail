@@ -96,7 +96,11 @@ The record is rewritten when the session is renamed (`session_info_changed`),
 when a run starts (`busy`) and when it settles (`idle`), and when an ask starts
 or stops waiting. It is removed at `session_shutdown`. A record whose process
 no longer exists counts as not running, and whoever reads it deletes it, so a
-session left behind by a crash is cleaned up too.
+session left behind by a crash is cleaned up too. The record also holds
+`started`, an opaque token for the process's start time (from `/proc` on Linux,
+`ps` on macOS), so a record whose process id the operating system has reused
+for another process is treated as gone too. A record without `started`, or a
+platform where the start time cannot be read, is judged by the process id alone.
 
 The model gets four tools:
 
