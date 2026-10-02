@@ -7,7 +7,7 @@ Every session has an address — its session id — and an inbox under
 `<mail root>/<address>/{tmp,new,cur,sent}/`. The mail root is
 `$XDG_STATE_HOME/pi-session-mail/`, or `~/.local/state/pi-session-mail/` when
 `XDG_STATE_HOME` is unset or not an absolute path. It is created owner-only
-(mode `0700`) and shared by every Pi route on the machine, so sessions in
+(mode `0700`) and shared by every Pi agent directory on the machine, so sessions in
 different agent directories reach each other. `/mailbox` shows this session's
 address and name, and `/mailbox <to> <text>` sends a request, with `to`
 resolved as described under [Addressing](#addressing). Mail waits
@@ -47,7 +47,7 @@ The model gets four tools:
 
 | Tool | Parameters | What it does |
 | --- | --- | --- |
-| `session_mail_list` | none | Lists every running session, in every route: its name (or short id, the first 8 characters of its id, when it has no name), full id, working directory, idle or busy state and whom it is waiting on, and marks the calling session. |
+| `session_mail_list` | none | Lists every running session, in every agent directory: its name (or short id, the first 8 characters of its id, when it has no name), full id, working directory, idle or busy state and whom it is waiting on, and marks the calling session. |
 | `session_mail_ask` | `to`, `message` | Writes an ask (`kind: "ask"`) and waits for the answer, which is the result: its status and body, labelled as not an answer when the status is `stopped` or `failed`. The wait ends when the answer arrives, after 10 minutes ("no answer yet"), when the target's running record disappears ("stopped running"), or when the user stops the run; `waitingOn` is set while it waits and cleared in every case. Refused at once, writing nothing, when another ask of this session is waiting, when the target is not running, when the target is waiting on this session, at the [hop limit](#hop-limit), and when `to` does not resolve, is ambiguous or is this session. |
 | `session_mail_reply` | `ask`, `message` | Answers one open ask this session received, at once, with status `done` and the turn's hop count, without ending the run; the asker's `session_mail_ask` returns with it. The answer at settle then leaves that ask out, while the sender's other requests and asks are still answered. Refused, sending nothing, for an ask already answered (by this tool or at settle), for a request (answered at settle), a message or a reply, for an id that never reached this session, and for an empty text. |
 | `session_mail_send` | `to`, `message` | Writes a message (`kind: "message"`) and returns its id. To a running session it is delivered at once; to a closed session, by full id, it waits in that session's inbox and the result says so. Refused when `to` does not resolve, is ambiguous or is this session, when the text is empty, and at the [hop limit](#hop-limit). |
@@ -162,7 +162,7 @@ import this package or read its files.
 ## Install
 
 ```bash
-pi install <path to this directory>
+pi install git:github.com/gvanderclay/pi-session-mail
 ```
 
 Once it is published, install it by name instead:
@@ -171,9 +171,10 @@ Once it is published, install it by name instead:
 pi install npm:pi-session-mail
 ```
 
-The package has no dependencies and no build step. The `pi` manifest loads only
+The package has no runtime dependencies and no build step. The `pi` manifest loads only
 `./index.ts`, and the tests under `test/` are neither loaded by Pi nor included
 in the npm tarball.
+Run them with `pnpm install && pnpm test`.
 
 ## Requirements
 
@@ -192,7 +193,7 @@ in the npm tarball.
 
 `mailbox` names no model. It reads one optional settings file,
 `<agent dir>/session-mail.json`, where the agent dir is Pi's
-(`PI_CODING_AGENT_DIR`, or `~/.pi/agent`), so each route sets its own:
+(`PI_CODING_AGENT_DIR`, or `~/.pi/agent`), so each agent directory sets its own:
 
 ```json
 { "hopLimit": 5 }

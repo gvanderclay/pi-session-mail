@@ -3,7 +3,7 @@
 //
 // Layout: <root>/<address>/{tmp,new,cur,sent}/<ms>-<id>.json, where the root
 // is `$XDG_STATE_HOME/pi-session-mail/` (or `~/.local/state/pi-session-mail/`)
-// and is shared by every route on this machine.
+// and is shared by every Pi agent directory on this machine.
 import { randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";

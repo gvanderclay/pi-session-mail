@@ -2,7 +2,7 @@
 // them only through the extension's registration function.
 //
 // `session_mail_list` reports every running Pi session on this machine, in
-// every route, and marks the calling one. `session_mail_send` leaves a plain
+// every agent directory, and marks the calling one. `session_mail_send` leaves a plain
 // message, which wakes or steers its recipient and expects no answer.
 // `session_mail_ask` leaves an ask and waits, one at a time, for the answer,
 // which comes back as its result rather than as a message.

@@ -5,7 +5,7 @@
 // its address, Pi session name, working directory, process id, idle or busy,
 // the address it waits on, and when the record last changed. A record whose
 // process is gone counts as not running, and the reader that finds it deletes
-// it. The root is the mail root, so every route sees every session.
+// it. The root is the mail root, so every agent directory sees every session.
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 

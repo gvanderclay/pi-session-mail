@@ -3,7 +3,7 @@
 // Every session has an address (its session id) and an inbox under
 // `<mail root>/<address>/`, where the mail root
 // (`$XDG_STATE_HOME/pi-session-mail/`, or `~/.local/state/pi-session-mail/`)
-// is shared by every route, so sessions in different routes reach each other.
+// is shared by every agent directory, so sessions in different ones reach each other.
 // Each running session also announces its name, working directory and idle or
 // busy state in `<mail root>/running/<address>.json` (`running.ts`), which
 // `session_mail_list` reports (`tools.ts`) and which lets a `to` name a
@@ -22,8 +22,7 @@
 // a `failed` reply instead. Replies and messages are never answered. Other extensions use
 // `pi.events` (below).
 //
-// The original specs (.scratch/pi-mailbox, pi-delegate, pi-conversations) are
-// in git history. The hook contracts live in this package's README.
+// The hook contracts live in this package's README.
 import { type FSWatcher, watch } from "node:fs";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
