@@ -155,8 +155,9 @@ function inboundText(
  * synchronous code before `emit` returns; do all work before any `await`.
  *
  * - `message:send`: the caller emits `{ to, body }`; `pi-session-mail` writes a
- *   request, stamped with the run's hop count during a run and 0 when idle, and sets `envelope` (or `error`) on the same object. Neither set
- *   means no provider is installed.
+ *   request, stamped with the run's hop count during a run and 0 when idle,
+ *   and sets `envelope` (or `error`) on the same object. Neither set means no
+ *   provider is installed.
  * - `message:inbound`: emitted for every claimed envelope, requests and
  *   replies alike, before injection; `requests` holds a reply's request
  *   copies from this session's `sent/`, and a listener sets `handled` to show

@@ -231,8 +231,9 @@ are never refused. Requests from `/mailbox` carry 0 and are never refused:
 their sender acts for the user. A `message:send` emitted while the session is
 idle carries 0 too. One emitted during a run carries that run's count and is
 not refused at send time; the session that receives it counts it like any
-other mail, so a chain that reaches the limit is refused there as a loop. The limit is a loop guard, not a
-security boundary: a hand-written envelope can claim any `hops`.
+other mail, so a chain that reaches the limit is refused there as a loop.
+The limit is a loop guard, not a security boundary: a hand-written envelope
+can claim any `hops`.
 
 ## Configuration
 
@@ -279,9 +280,8 @@ The consumer emits `{ to, body }`. Consumers send on the user's behalf: a
 command the user typed, or a tool whose call the user started. A provider
 writes a request (`kind: "request"`) from its own session's address and sets
 `envelope` on the same object before `emit` returns, or sets `error` instead.
-**If neither is set, no provider is
-installed**, and the consumer should refuse rather than pretend the message
-was sent.
+**If neither is set, no provider is installed**, and the consumer should
+refuse rather than pretend the message was sent.
 
 | Field | Set by | Meaning |
 | --- | --- | --- |
@@ -405,17 +405,19 @@ Sessions running older and newer copies of `pi-session-mail` share one mail
 root, and other extensions depend on its hooks, so these are stable:
 
 - The three hooks, `message:send`, `message:inbound` and `message:scan`, and
-  their payloads.
+  their payloads as [Hooks](#hooks) describes them.
 - The `[mailbox] From …` label and the `[mailbox] End of the mail …` line that
   frame injected mail.
 - The mail root path, `$XDG_STATE_HOME/pi-session-mail/`, or
   `~/.local/state/pi-session-mail/` when `XDG_STATE_HOME` is unset or not
   absolute.
-- The envelope fields, the kinds (`request`, `reply`, `message`, `ask`) and the
-  statuses (`done`, `stopped`, `failed`).
+- The envelope fields (`id`, `from`, `to`, `kind`, `hops`, `in_reply_to`,
+  `status`, `ts`, `body`), the kinds (`request`, `reply`, `message`, `ask`)
+  and a reply's statuses (`done`, `stopped`, `failed`); see
+  [Envelopes](#envelopes).
 - The names of the tools (`session_mail_list`, `session_mail_send`,
   `session_mail_ask`, `session_mail_reply`) and of the `/mailbox` command.
-- The keys of `session-mail.json`.
+- The keys of `session-mail.json`, today only `hopLimit`.
 
 Changing any of them needs a major version from 1.0 on, and a minor version
 while the package is at 0.x.
