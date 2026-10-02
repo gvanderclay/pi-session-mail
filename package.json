@@ -1,6 +1,6 @@
 {
 	"name": "pi-session-mail",
-	"version": "0.2.1",
+	"version": "0.2.2",
 	"description": "A file mailbox between Pi sessions on the same machine",
 	"keywords": [
 		"pi-package",
