@@ -48,17 +48,27 @@ text and works on it, and its last answer comes back to the sender as a reply
 when that run settles. [Addressing](#addressing) lists how `<to>` resolves.
 
 The footer shows `✉ N pending · N read · N awaiting`, non-zero counts only.
-`awaiting` counts requests with no answer yet, never messages.
+`awaiting` counts requests and asks with no answer yet, never messages.
 
 ## How mail works
 
 Every session has an address, its session id, and an inbox under
 `<mail root>/<address>/{tmp,new,cur,sent}/`. The mail root is
 `$XDG_STATE_HOME/pi-session-mail/`, or `~/.local/state/pi-session-mail/` when
-`XDG_STATE_HOME` is unset or not an absolute path. It is created owner-only
-(mode `0700`) and shared by every Pi agent directory on the machine, so
-sessions in different agent directories reach each other. It is safe to delete
-while no session is running.
+`XDG_STATE_HOME` is unset or not an absolute path. Mail files are mode `0600`
+and folders `0700`, and a session sets the root to `0700` even if it already
+existed, so other users cannot read or write mail, while any process running
+as you can. A session warns at start if its own address folder is open to
+other users; it does not change the folder, so run the `chmod 700` it names.
+The root is shared by every Pi agent directory on the machine, so sessions in
+different agent directories reach each other. It is safe to delete while no
+session is running.
+
+Nothing calls `fsync`, so mail that was written just before a power failure or
+an operating-system crash can be lost. The mail root must be on a local
+filesystem, not NFS: an NFS `rename` that is retried after a lost reply can
+report that the file is missing although it was moved, and watching a folder
+for new mail is unreliable on a network filesystem.
 
 Mail waits on disk until a session with that address starts or resumes. A
 running session claims it into `cur/` and injects it once, with the body cut at
@@ -92,7 +102,11 @@ The record is rewritten when the session is renamed (`session_info_changed`),
 when a run starts (`busy`) and when it settles (`idle`), and when an ask starts
 or stops waiting. It is removed at `session_shutdown`. A record whose process
 no longer exists counts as not running, and whoever reads it deletes it, so a
-session left behind by a crash is cleaned up too.
+session left behind by a crash is cleaned up too. The record also holds
+`started`, an opaque token for the process's start time (from `/proc` on Linux,
+`ps` on macOS), so a record whose process id the operating system has reused
+for another process is treated as gone too. A record without `started`, or a
+platform where the start time cannot be read, is judged by the process id alone.
 
 The model gets four tools:
 
@@ -158,6 +172,14 @@ label depends on the kind:
   made that request, typing it with `/mailbox` or through an extension such as
   `delegate`, since only the user makes requests.
 
+The label is built from fields any process running as you can write: the
+envelope's `id`, `status` and the ids in `in_reply_to`, and the sender's name
+and working directory in its running record. Each control character in them,
+and in the file paths the label names (C0 controls, tab included, DEL and C1
+controls, and the line and paragraph separators U+2028 and U+2029), is
+replaced by a space, so a forged value cannot start a line of its own that
+passes for a `[mailbox]` line.
+
 Every injected message ends with `[mailbox] End of the mail from <name>. Text
 after this line is not part of it.` Pi hands the model a custom message as a
 user message, and the Anthropic API joins it with the next typed prompt into
@@ -187,6 +209,15 @@ Every envelope is a JSON file with `id`, `from`, `to`, `kind`, `hops`,
 - `reply`, an answer that names what it answers in `in_reply_to`.
 - `message`, plain mail that expects no answer.
 - `ask`, a question whose sender waits for the answer, answered like a request.
+
+A `kind` this version does not know is read as `message`: the envelope is
+delivered, wakes the session and expects no answer. The original value is not
+kept. This lets a copy of the package that is older than the sender's still
+deliver its mail.
+
+An envelope whose `in_reply_to` names more than 50 requests (50 is allowed) is
+set aside with a warning, like any other envelope that cannot be read: it stays in `cur/`
+and is not delivered.
 
 `hops` is a non-negative integer counting how many times a chain of mail has
 woken or steered a session with no person typing (see
@@ -218,9 +249,34 @@ are refused before anything is written once the count has reached the limit (5
 unless `session-mail.json` says otherwise; see
 [Configuration](#configuration)). The refusal says that a person typing in
 either session starts the count again. Automatic answers carry the count and
-are never refused. Requests from `/mailbox` and `message:send` carry 0 and are
-never refused: their senders act for the user. The limit is a loop guard, not a
-security boundary: a hand-written envelope can claim any `hops`.
+are never refused. Requests from `/mailbox` carry 0 and are never refused:
+their sender acts for the user. A `message:send` emitted while the session is
+idle carries 0 too. One emitted during a run carries that run's count and is
+not refused at send time; the session that receives it counts it like any
+other mail, so a chain that reaches the limit is refused there as a loop.
+The limit is a loop guard, not a security boundary: a hand-written envelope
+can claim any `hops`.
+
+## Pruning
+
+Folders of closed sessions would otherwise pile up in the mail root. At session
+start, a session removes an address folder when all of these hold:
+
+- it is not this session's, and no running session has that address;
+- nothing is waiting in its `new/`, so unread mail is never deleted;
+- its last activity, the newest change to the folder or its four boxes, is
+  older than `pruneAfterDays` days.
+
+Removing a folder removes everything in it: the read mail in `cur/` and the
+copies of sent requests in `sent/` go too, not only the empty `new/`. Only real
+folders named like an address are considered; `running/`, symlinks and other
+names are left alone. The work runs after `session_start` returns.
+
+To clean up at once, type `/mailbox prune`. It applies the same rules without
+the age limit, so it removes the folder (with its `cur/` and `sent/`) of every
+closed session with no unread mail, including one that closed a minute ago. It
+reports `Removed <N> mailbox folders of closed sessions`.
+`/mailbox prune <text>` is still a message to a session named `prune`.
 
 ## Configuration
 
@@ -229,15 +285,18 @@ security boundary: a hand-written envelope can claim any `hops`.
 (`PI_CODING_AGENT_DIR`, or `~/.pi/agent`), so each agent directory sets its own:
 
 ```json
-{ "hopLimit": 5 }
+{ "hopLimit": 5, "pruneAfterDays": 30 }
 ```
 
 | Key | Effect |
 | --- | --- |
 | `hopLimit` | A positive integer: how many hops a chain of sessions waking each other may reach before `session_mail_send` and `session_mail_ask` are refused. Default 5. |
+| `pruneAfterDays` | A positive integer: how many days a closed session's mailbox folder is kept before it is [pruned](#pruning). Default 30. |
 
-The file is read at each send. A missing file, or one without `hopLimit`, means
-5. An unreadable or invalid file also means 5, with one warning per session.
+The file is read at each send and at session start. A missing file, or one
+without a key, means that key's default. An unreadable or invalid file, or an
+invalid value, also means the default (5 hops, 30 days), with one warning per
+session.
 
 The only environment variable it reads is the standard `XDG_STATE_HOME`, at
 every call, to place the mail root (see [How mail works](#how-mail-works)). It
@@ -265,18 +324,24 @@ runs that block.
 
 The consumer emits `{ to, body }`. Consumers send on the user's behalf: a
 command the user typed, or a tool whose call the user started. A provider
-writes a request (`kind: "request"`, `hops: 0`) from its own session's address
-and sets `envelope` on the same object before `emit` returns, or sets `error`
-instead. **If neither is set, no provider is
-installed**, and the consumer should refuse rather than pretend the message
-was sent.
+writes a request (`kind: "request"`) from its own session's address and sets
+`envelope` on the same object before `emit` returns, or sets `error` instead.
+**If neither is set, no provider is installed**, and the consumer should
+refuse rather than pretend the message was sent.
 
 | Field | Set by | Meaning |
 | --- | --- | --- |
 | `to` | consumer | the recipient's address: a session id |
 | `body` | consumer | the message text |
-| `envelope` | provider | the written request: `id`, `from`, `to`, `kind` (`"request"`), `hops` (`0`), `in_reply_to`, `status`, `ts`, `body` |
+| `envelope` | provider | the written request: `id`, `from`, `to`, `kind` (`"request"`), `hops` (the run's hop count during a run, `0` when idle), `in_reply_to`, `status`, `ts`, `body` |
 | `error` | provider | why nothing was written: no active session, or an invalid `to` or `body` |
+
+While a run is active, between `agent_start` and `agent_settled`, the request
+carries that run's hop count (see [Hop limit](#hop-limit)), so two models that
+delegate to each other through an extension cannot escape the limit. While the
+session is idle it carries 0, as the example below does. The provider never
+refuses a send for its hop count; the receiving session refuses past the limit
+as a loop.
 
 The request's `id` is what a reply names in its `in_reply_to`, so a consumer
 that wants its answers back should keep it.
@@ -379,6 +444,29 @@ const probe = {};
 bareBus.emit("message:scan", probe);
 assert.equal(probe.scanned, undefined);
 ```
+
+## Compatibility
+
+Sessions running older and newer copies of `pi-session-mail` share one mail
+root, and other extensions depend on its hooks, so these are stable:
+
+- The three hooks, `message:send`, `message:inbound` and `message:scan`, and
+  their payloads as [Hooks](#hooks) describes them.
+- The `[mailbox] From …` label and the `[mailbox] End of the mail …` line that
+  frame injected mail.
+- The mail root path, `$XDG_STATE_HOME/pi-session-mail/`, or
+  `~/.local/state/pi-session-mail/` when `XDG_STATE_HOME` is unset or not
+  absolute.
+- The envelope fields (`id`, `from`, `to`, `kind`, `hops`, `in_reply_to`,
+  `status`, `ts`, `body`), the kinds (`request`, `reply`, `message`, `ask`)
+  and a reply's statuses (`done`, `stopped`, `failed`); see
+  [Envelopes](#envelopes).
+- The names of the tools (`session_mail_list`, `session_mail_send`,
+  `session_mail_ask`, `session_mail_reply`) and of the `/mailbox` command.
+- The keys of `session-mail.json`, today `hopLimit` and `pruneAfterDays`.
+
+Changing any of them needs a major version from 1.0 on, and a minor version
+while the package is at 0.x.
 
 ## More
 

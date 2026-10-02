@@ -23,10 +23,20 @@
 // `pi.events` (below).
 //
 // The hook contracts live in this package's README.
-import { type FSWatcher, watch } from "node:fs";
+import { type FSWatcher, statSync, watch } from "node:fs";
+import { dirname } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { label, listRunning, type RunningRecord, removeRecord, resolveTo, type State, writeRecord } from "./running.ts";
+import {
+	isRunning,
+	label,
+	listRunning,
+	type RunningRecord,
+	removeRecord,
+	resolveTo,
+	type State,
+	writeRecord,
+} from "./running.ts";
 import { type SettleInput, settle } from "./settle.ts";
 import {
 	boxPath,
@@ -37,14 +47,16 @@ import {
 	findSent,
 	isAddress,
 	listNew,
+	pruneClosed,
 	readEnvelope,
 	type SentCopy,
 	send,
 } from "./store.ts";
-import { registerTools, type Tools } from "./tools.ts";
+import { readSettings, registerTools, type Tools } from "./tools.ts";
 
 const CUSTOM_TYPE = "mailbox";
 const STATUS_KEY = "mailbox";
+const DAY_MS = 24 * 60 * 60 * 1000;
 /** Fallback rescan interval; `fs.watch` on macOS drops and coalesces events. */
 const POLL_MS = 1000;
 /** Inbound bodies are cut at this many UTF-8 bytes. */
@@ -58,14 +70,22 @@ function cap(text: string, max: number): string | undefined {
 	return read === text.length ? undefined : text.slice(0, read);
 }
 
+/**
+ * Text from outside this session (an id, a name, a working directory) with every
+ * control character (C0, DEL, C1) and the line and paragraph separators
+ * U+2028/U+2029 replaced by a space, so it cannot start a line of its own and
+ * pass for a `[mailbox]` line.
+ */
+const plain = (text: string): string => text.replace(/[\p{Cc}\u2028\u2029]/gu, " ");
+
 /** A reply quotes each request it answers: the id, the copy's path, then the capped body. */
 function quoteRequest(request: SentCopy): string {
 	const cut = cap(request.envelope.body, QUOTE_CAP);
 	const body =
 		cut === undefined
 			? request.envelope.body
-			: `${cut}\n[mailbox] Request cut at 2 KiB; the full copy is ${request.path}`;
-	return `[mailbox] Your request ${request.envelope.id}, quoted from ${request.path}:\n${body
+			: `${cut}\n[mailbox] Request cut at 2 KiB; the full copy is ${plain(request.path)}`;
+	return `[mailbox] Your request ${plain(request.envelope.id)}, quoted from ${plain(request.path)}:\n${body
 		.split("\n")
 		.map((line) => `> ${line}`)
 		.join("\n")}`;
@@ -78,10 +98,11 @@ function quoteRequest(request: SentCopy): string {
 function requestQuotes(me: string, ids: readonly string[]): { requests: SentCopy[]; quotes: string[] } {
 	const requests: SentCopy[] = [];
 	const quotes: string[] = [];
+	const copies = findSent(me, ids);
 	for (const id of ids) {
-		const copy = findSent(me, id);
+		const copy = copies.get(id);
 		if (copy === undefined) {
-			quotes.push(`[mailbox] Your request ${id} has no copy in sent/; only its id is known.`);
+			quotes.push(`[mailbox] Your request ${plain(id)} has no copy in sent/; only its id is known.`);
 			continue;
 		}
 		requests.push(copy);
@@ -97,8 +118,8 @@ function requestQuotes(me: string, ids: readonly string[]): { requests: SentCopy
  * as a possible injection (spec Q37). Safety lives outside the model.
  */
 function senderLine(address: string, record: RunningRecord | undefined): { line: string; name: string } {
-	const where = record === undefined ? "" : `, working in ${record.cwd}`;
-	const name = label(record ?? { address });
+	const where = record === undefined ? "" : `, working in ${plain(record.cwd)}`;
+	const name = plain(label(record ?? { address }));
 	return { line: `[mailbox] From ${name} (${address}${where}), another Pi session on this machine.`, name };
 }
 
@@ -119,32 +140,30 @@ function inboundText(
 	path: string,
 	quotes: readonly string[],
 	opts: { lateAnswer: boolean; byUser: boolean },
+	senderRecord: RunningRecord | undefined,
 ): string {
 	const { lateAnswer, byUser } = opts;
-	const sender = senderLine(
-		envelope.from,
-		listRunning().find((r) => r.address === envelope.from),
-	);
+	const sender = senderLine(envelope.from, senderRecord);
+	const id = plain(envelope.id);
+	const replyIds = envelope.in_reply_to.map(plain);
 	const header = [sender.line];
 	if (envelope.kind === "request") header.push("Your final answer this turn goes back to it automatically.");
 	if (envelope.kind === "ask")
 		header.push(
-			`It is waiting for your answer to its ask ${envelope.id}. Answer with session_mail_reply (ask ${envelope.id}); otherwise this run's last message is sent as the answer.`,
+			`It is waiting for your answer to its ask ${id}. Answer with session_mail_reply (ask ${id}); otherwise this run's last message is sent as the answer.`,
 		);
 	if (lateAnswer) header.push("It answers an ask of yours that has stopped waiting, so it arrives as a message.");
 	if (envelope.kind === "message")
 		header.push(`It expects no answer; if one is wanted, send it with session_mail_send to ${envelope.from}.`);
 	if (envelope.in_reply_to.length > 0)
-		header.push(
-			`It is a reply to your request${envelope.in_reply_to.length > 1 ? "s" : ""} ${envelope.in_reply_to.join(", ")}.`,
-		);
+		header.push(`It is a reply to your request${envelope.in_reply_to.length > 1 ? "s" : ""} ${replyIds.join(", ")}.`);
 	if (byUser)
 		header.push("The user made that request, typing it with /mailbox or through an extension such as delegate.");
 	if (envelope.in_reply_to.length > 0 && envelope.status !== "done")
-		header.push(`Its status is "${envelope.status}", not "done": it is not an answer.`);
+		header.push(`Its status is "${plain(String(envelope.status))}", not "done": it is not an answer.`);
 	const cut = cap(envelope.body, BODY_CAP);
 	const body =
-		cut === undefined ? envelope.body : `${cut}\n\n[mailbox] Body cut at 32 KiB; the full envelope is ${path}`;
+		cut === undefined ? envelope.body : `${cut}\n\n[mailbox] Body cut at 32 KiB; the full envelope is ${plain(path)}`;
 	return [header.join(" "), ...quotes, body, endLine(sender.name)].join("\n\n");
 }
 
@@ -153,8 +172,9 @@ function inboundText(
  * synchronous code before `emit` returns; do all work before any `await`.
  *
  * - `message:send`: the caller emits `{ to, body }`; `pi-session-mail` writes a
- *   request and sets `envelope` (or `error`) on the same object. Neither set
- *   means no provider is installed.
+ *   request, stamped with the run's hop count during a run and 0 when idle,
+ *   and sets `envelope` (or `error`) on the same object. Neither set means no
+ *   provider is installed.
  * - `message:inbound`: emitted for every claimed envelope, requests and
  *   replies alike, before injection; `requests` holds a reply's request
  *   copies from this session's `sent/`, and a listener sets `handled` to show
@@ -230,8 +250,8 @@ export default function mailbox(pi: ExtensionAPI) {
 	 * steered into it. Mail sent from the turn carries it.
 	 */
 	let hops = 0;
-	/** Whether this session has already warned about a broken `session-mail.json`. */
-	let configWarned = false;
+	/** The problems with `session-mail.json` this session has already warned about. */
+	let configWarned = new Set<string>();
 	/** What this session's running-session record says. */
 	let name: string | undefined;
 	let cwd = "";
@@ -260,6 +280,19 @@ export default function mailbox(pi: ExtensionAPI) {
 	}
 
 	const warn = (message: string) => ctx?.ui.notify(`mailbox: ${message}`, "warning");
+
+	/** The address folder is left as found; tell the user how to tighten it. */
+	function warnIfLoose(me: string) {
+		const folder = dirname(boxPath(me, "new"));
+		let mode: number;
+		try {
+			mode = statSync(folder).mode & 0o777;
+		} catch {
+			return;
+		}
+		if ((mode & 0o077) === 0) return;
+		warn(`${folder} is mode ${mode.toString(8)}, open to other users; run: chmod 700 ${folder}`);
+	}
 
 	/** Footer entry `✉ N pending · N read · N awaiting`, non-zero parts only; hidden when all are zero. */
 	function updateStatus() {
@@ -318,7 +351,13 @@ export default function mailbox(pi: ExtensionAPI) {
 		pi.sendMessage(
 			{
 				customType: CUSTOM_TYPE,
-				content: inboundText(envelope, path, quotes, { lateAnswer, byUser }),
+				content: inboundText(
+					envelope,
+					path,
+					quotes,
+					{ lateAnswer, byUser },
+					listRunning().find((r) => r.address === envelope.from),
+				),
 				display: true,
 				details: { id: envelope.id },
 			},
@@ -358,8 +397,11 @@ export default function mailbox(pi: ExtensionAPI) {
 		try {
 			if (address === undefined) throw new Error("no active session has a mailbox address");
 			if (typeof payload.body !== "string") throw new Error("body must be a string");
-			// A `message:send` caller acts for the user, so its request starts a fresh chain.
-			payload.envelope = send(address, payload.to as string, payload.body, { kind: "request", hops: 0 });
+			// During a run the caller is the model acting through an extension, so the
+			// request continues the run's chain; idle, it acts for the user and starts a
+			// fresh one. It is never refused here: the receiving side enforces the limit.
+			const hopsNow = state === "busy" ? hops : 0;
+			payload.envelope = send(address, payload.to as string, payload.body, { kind: "request", hops: hopsNow });
 			updateStatus();
 		} catch (err) {
 			payload.error = (err as Error).message;
@@ -375,6 +417,23 @@ export default function mailbox(pi: ExtensionAPI) {
 		payload.scanned = true;
 	});
 
+	/** Warn about a problem with `session-mail.json`, once per session. */
+	function configProblem(message: string) {
+		if (configWarned.has(message)) return;
+		configWarned.add(message);
+		warn(message);
+	}
+
+	/** Remove closed sessions' folders that are older than `pruneAfterDays`; a failure warns and never throws. */
+	function pruneOld(me: string) {
+		try {
+			const { pruneAfterDays } = readSettings(configProblem);
+			pruneClosed({ own: me, isRunning, cutoffMs: Date.now() - pruneAfterDays * DAY_MS });
+		} catch (err) {
+			warn(`could not prune old mailbox folders: ${(err as Error).message}`);
+		}
+	}
+
 	pi.on("session_start", async (_event, context) => {
 		stop();
 		ctx = context;
@@ -388,7 +447,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		hops = 0;
 		tools?.abandonAsk();
 		waitingOn = "";
-		configWarned = false;
+		configWarned = new Set();
 		const id = context.sessionManager.getSessionId();
 		if (!isAddress(id)) {
 			address = undefined;
@@ -396,9 +455,17 @@ export default function mailbox(pi: ExtensionAPI) {
 			warn(`session id ${JSON.stringify(id)} is not a usable address; the mailbox is off`);
 			return;
 		}
+		try {
+			ensureBoxes(id);
+		} catch (err) {
+			address = undefined;
+			tools?.setAddress(undefined);
+			warn(`mailbox is off: ${(err as Error).message}`);
+			return;
+		}
 		address = id;
 		tools?.setAddress(id);
-		ensureBoxes(id);
+		warnIfLoose(id);
 		name = context.sessionManager.getSessionName?.() || undefined;
 		cwd = context.cwd;
 		state = context.isIdle?.() === false ? "busy" : "idle";
@@ -412,6 +479,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		pendingScan = setImmediate(() => {
 			pendingScan = undefined;
 			scan();
+			pruneOld(id);
 		});
 		pendingScan.unref?.();
 		try {
@@ -535,15 +603,12 @@ export default function mailbox(pi: ExtensionAPI) {
 			announce();
 		},
 		hops: () => hops,
-		configProblem: (message) => {
-			if (configWarned) return;
-			configWarned = true;
-			warn(message);
-		},
+		configProblem,
 	});
 
 	pi.registerCommand("mailbox", {
-		description: "Show this session's mailbox address and name, or send a request: /mailbox <name or id> <text>",
+		description:
+			"Show this session's mailbox address and name, send a request: /mailbox <name or id> <text>, or remove closed sessions' empty mailbox folders: /mailbox prune",
 		handler: async (args, context) => {
 			const me = context.sessionManager.getSessionId();
 			const trimmed = args.trim();
@@ -553,6 +618,15 @@ export default function mailbox(pi: ExtensionAPI) {
 					`Mailbox address: ${me}\nName: ${current === undefined ? `none; other sessions see ${label({ address: me })} (set one with /name)` : current}`,
 					"info",
 				);
+				return;
+			}
+			if (trimmed === "prune") {
+				try {
+					const removed = pruneClosed({ own: me, isRunning });
+					context.ui.notify(`Removed ${removed} mailbox folders of closed sessions`, "info");
+				} catch (err) {
+					context.ui.notify(`mailbox: ${(err as Error).message}`, "error");
+				}
 				return;
 			}
 			const match = /^(\S+)\s+([\s\S]+)$/.exec(trimmed);

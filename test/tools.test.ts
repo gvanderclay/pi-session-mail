@@ -70,6 +70,13 @@ test("a session start writes a record, run state updates it, and shutdown remove
 	assert.equal(records().has(a.id), false);
 });
 
+test("a running session's record holds this process's start token", async () => {
+	const a = session(newId());
+	await a.start();
+	assert.equal(typeof (records().get(a.id) as { started?: unknown }).started, "string");
+	await a.shutdown();
+});
+
 test("the records directory and each record are owner-only", async () => {
 	const a = session(newId());
 	await a.start();
@@ -143,6 +150,29 @@ test("a record whose process is gone is left out of the list and deleted", async
 	assert.match(text, /^1 running session:/);
 	assert.ok(!text.includes("ghost"), text);
 	assert.equal(existsSync(path), false);
+	await a.shutdown();
+});
+
+test("a record with this process's pid but another start token is not listed and is deleted", async () => {
+	const a = session(newId());
+	await a.start();
+	const reused = newId();
+	const path = plantRecord(reused, { pid: process.pid, name: "reused", started: "not-this-process" });
+	const text = (await a.toolCall("session_mail_list")).content[0].text;
+	assert.match(text, /^1 running session:/);
+	assert.ok(!text.includes("reused"), text);
+	assert.equal(existsSync(path), false);
+	await a.shutdown();
+});
+
+test("a record with no start token is judged by its pid alone", async () => {
+	const a = session(newId());
+	await a.start();
+	const old = newId();
+	plantRecord(old, { pid: process.pid, name: "old" });
+	const text = (await a.toolCall("session_mail_list")).content[0].text;
+	assert.match(text, /^2 running sessions:/);
+	assert.ok(text.includes("- old\n"), text);
 	await a.shutdown();
 });
 
@@ -392,7 +422,7 @@ test("session_mail_send refuses an empty text, an unknown or ambiguous to, and t
 let planted = 0;
 /** An envelope written by hand into `to`'s new/, as a session at hop count `hops` would send it. */
 function plant(to: string, from: string, hops: number, kind = "message") {
-	mkdirSync(join(stateRoot(), to, "new"), { recursive: true });
+	mkdirSync(join(stateRoot(), to, "new"), { recursive: true, mode: 0o700 });
 	const id = `planted-${++planted}`;
 	const name = `${String(planted).padStart(15, "0")}-${id}.json`;
 	writeFileSync(
@@ -591,6 +621,34 @@ for (const [what, text] of [
 		});
 	});
 }
+
+for (const [what, text] of [
+	["not JSON", "{ pruneAfterDays: 2"],
+	["a zero pruneAfterDays", JSON.stringify({ pruneAfterDays: 0 })],
+	["a fractional pruneAfterDays", JSON.stringify({ pruneAfterDays: 1.5 })],
+	["a string pruneAfterDays", JSON.stringify({ pruneAfterDays: "7" })],
+] as const) {
+	test(`a session-mail.json that is ${what} means 30 days, with exactly one warning across the start and two sends`, async () => {
+		await withConfig(text, async () => {
+			const s = await atHops(1);
+			await until(() => s.warnings.length > 0, "the prune at session start to read the settings");
+			await s.toolCall("session_mail_send", { to: newId(), message: "first" });
+			await s.toolCall("session_mail_send", { to: newId(), message: "second" });
+			assert.equal(s.warnings.length, 1);
+			assert.match(s.warnings[0], /session-mail\.json[\s\S]*30/);
+			await s.shutdown();
+		});
+	});
+}
+
+test("a valid pruneAfterDays gives no warning", async () => {
+	await withConfig(JSON.stringify({ pruneAfterDays: 7 }), async () => {
+		const s = await atHops(1);
+		await s.toolCall("session_mail_send", { to: newId(), message: "hi" });
+		assert.deepEqual(s.warnings, []);
+		await s.shutdown();
+	});
+});
 
 // ---------------------------------------------------------------------------
 // session_mail_ask
