@@ -27,10 +27,14 @@ function act(label, method, path, body) {
 const repo = gh(["repo", "view", "--json", "nameWithOwner"]).nameWithOwner;
 act(`update the settings of ${repo}`, "PATCH", `repos/${repo}`, desired.repository);
 
+const reporting = desired.private_vulnerability_reporting
+	? { verb: "enable", method: "PUT" }
+	: { verb: "disable", method: "DELETE" };
+const reportingPath = `repos/${repo}/private-vulnerability-reporting`;
 act(
-	`${desired.private_vulnerability_reporting ? "enable" : "disable"} private vulnerability reporting`,
-	desired.private_vulnerability_reporting ? "PUT" : "DELETE",
-	`repos/${repo}/private-vulnerability-reporting`,
+	`${reporting.verb} private vulnerability reporting (${reporting.method} ${reportingPath})`,
+	reporting.method,
+	reportingPath,
 );
 
 // ponytail: one page of 100 rulesets; paginate if a repository ever has more.
