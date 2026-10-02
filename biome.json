@@ -67,17 +67,7 @@
 	},
 	"overrides": [
 		{
-			"includes": ["index.ts"],
-			"linter": {
-				"rules": {
-					"style": {
-						"noDefaultExport": "off"
-					}
-				}
-			}
-		},
-		{
-			"includes": ["index.ts"],
+			"includes": ["src/index.ts"],
 			"linter": {
 				"rules": {
 					"complexity": {
@@ -88,6 +78,7 @@
 						"useExplicitType": "off"
 					},
 					"style": {
+						"noDefaultExport": "off",
 						"noExcessiveLinesPerFile": "off",
 						"noNestedTernary": "off"
 					}
@@ -95,7 +86,7 @@
 			}
 		},
 		{
-			"includes": ["running.ts"],
+			"includes": ["src/running.ts"],
 			"linter": {
 				"rules": {
 					"complexity": {
@@ -108,7 +99,7 @@
 			}
 		},
 		{
-			"includes": ["store.ts"],
+			"includes": ["src/store.ts"],
 			"linter": {
 				"rules": {
 					"nursery": {
@@ -118,7 +109,7 @@
 			}
 		},
 		{
-			"includes": ["tools.ts"],
+			"includes": ["src/tools.ts"],
 			"linter": {
 				"rules": {
 					"complexity": {

@@ -24,14 +24,11 @@
 	"packageManager": "pnpm@10.33.0",
 	"pi": {
 		"extensions": [
-			"./index.ts"
+			"./src/index.ts"
 		]
 	},
 	"files": [
-		"index.ts",
-		"store.ts",
-		"running.ts",
-		"tools.ts",
+		"src",
 		"README.md",
 		"LICENSE",
 		"CHANGELOG.md"

@@ -6,7 +6,7 @@ inbox: the `/mailbox` command, the `session_mail_*` tools, and the
 
 ## Layout
 
-- The extension is the top-level `.ts` files. `index.ts` is the entry Pi
+- The extension is the `.ts` files in `src/`. `src/index.ts` is the entry Pi
   loads; `store.ts` owns the mail root on disk, `running.ts` the
   running-session records and `tools.ts` the model-facing tools.
 - Tests and their helper `harness.ts` are in `test/`. Nothing under `test/`
@@ -19,7 +19,7 @@ inbox: the `/mailbox` command, the `session_mail_*` tools, and the
   with a fresh `HOME` and no `PI_CODING_AGENT_DIR`.
 - A single file: `node --test test/hooks.test.ts`.
 - `node scripts/check-pack.mjs` after changing `package.json` `files` or adding
-  a top-level file. Every top-level `.ts` file must be in `files`.
+  a source file. `files` lists `src`, so every `.ts` file in `src/` is published.
 - `biome.json` relaxes some rules for the files that predate this repository
   (one override per file). New files get the full rules; do not add a file to
   an override to get past a rule.

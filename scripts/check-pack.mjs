@@ -1,5 +1,5 @@
 // Checks the file list `npm pack` would publish. There is no build step: Pi
-// loads the .ts sources as they are. So every top-level .ts file, the README,
+// loads the .ts sources as they are. So every .ts file in src/, the README,
 // LICENSE, CHANGELOG and package.json must be in it, nothing from tests or
 // tooling may be, and every relative import in a packed .ts file must point at
 // another packed file.
@@ -21,7 +21,9 @@ const files = new Set(packed);
 
 const problems = [];
 
-const sources = readdirSync(".").filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts"));
+const sources = readdirSync("src")
+	.filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts"))
+	.map((name) => `src/${name}`);
 const REQUIRED = ["package.json", "README.md", "LICENSE", "CHANGELOG.md", ...sources];
 for (const path of REQUIRED) {
 	if (!files.has(path)) problems.push(`missing: ${path}`);
