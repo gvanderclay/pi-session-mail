@@ -30,6 +30,10 @@ follows [Semantic Versioning](https://semver.org/).
   (written by 0.1.0), and platforms where the start time cannot be read, are
   still judged by process id alone.
 - The README states the minimum Pi version: 0.80.4 or later, tested with 1.0.0.
+  It also says that mail can be lost on a power failure (nothing calls
+  `fsync`), that the mail root must be on a local filesystem, not NFS, that
+  `awaiting` counts requests and asks, and that an envelope naming more than
+  50 requests is set aside.
 - Private vulnerability reporting is enabled, so the advisory form linked from
   `SECURITY.md` works.
 - A session warns at start when its own address folder grants group or other
@@ -73,6 +77,11 @@ follows [Semantic Versioning](https://semver.org/).
   warning.
 - A reply quotes its requests from one listing of `sent/`, not one listing per
   id.
+- The `[mailbox]` label replaces control characters (C0, DEL, C1, and the
+  separators U+2028 and U+2029) with spaces in the envelope id, the ids it
+  answers, its status, the sender's name and working directory, and the paths
+  it names, so a forged value cannot start a line that passes for a
+  `[mailbox]` line. The label text is otherwise unchanged.
 
 ## [0.1.0] - 2026-10-02
 

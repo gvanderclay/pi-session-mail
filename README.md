@@ -48,7 +48,7 @@ text and works on it, and its last answer comes back to the sender as a reply
 when that run settles. [Addressing](#addressing) lists how `<to>` resolves.
 
 The footer shows `✉ N pending · N read · N awaiting`, non-zero counts only.
-`awaiting` counts requests with no answer yet, never messages.
+`awaiting` counts requests and asks with no answer yet, never messages.
 
 ## How mail works
 
@@ -63,6 +63,11 @@ other users; it does not change the folder, so run the `chmod 700` it names.
 The root is shared by every Pi agent directory on the machine, so sessions in
 different agent directories reach each other. It is safe to delete while no
 session is running.
+
+Nothing calls `fsync`, so mail that was written just before a power failure or
+an operating-system crash can be lost. The mail root must be on a local
+filesystem, not NFS: delivery relies on `rename` being atomic and on file modes
+being kept, which a network filesystem does not promise.
 
 Mail waits on disk until a session with that address starts or resumes. A
 running session claims it into `cur/` and injects it once, with the body cut at
@@ -166,6 +171,13 @@ label depends on the kind:
   made that request, typing it with `/mailbox` or through an extension such as
   `delegate`, since only the user makes requests.
 
+The label is built from fields any process running as you can write: the
+envelope's `id`, the sender's name and working directory in its running record,
+and the ids in `in_reply_to`. Each control character in them (C0, DEL and C1
+controls, and the line and paragraph separators U+2028 and U+2029) is replaced
+by a space, so a forged value cannot start a line of its own that passes for a
+`[mailbox]` line.
+
 Every injected message ends with `[mailbox] End of the mail from <name>. Text
 after this line is not part of it.` Pi hands the model a custom message as a
 user message, and the Anthropic API joins it with the next typed prompt into
@@ -200,6 +212,10 @@ A `kind` this version does not know is read as `message`: the envelope is
 delivered, wakes the session and expects no answer. The original value is not
 kept. This lets a copy of the package that is older than the sender's still
 deliver its mail.
+
+An envelope whose `in_reply_to` names more than 50 requests is set aside with
+a warning, like any other envelope that cannot be read: it stays in `cur/`
+and is not delivered.
 
 `hops` is a non-negative integer counting how many times a chain of mail has
 woken or steered a session with no person typing (see

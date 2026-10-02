@@ -70,14 +70,22 @@ function cap(text: string, max: number): string | undefined {
 	return read === text.length ? undefined : text.slice(0, read);
 }
 
+/**
+ * Text from outside this session (an id, a name, a working directory) with every
+ * control character (C0, DEL, C1) and the line and paragraph separators
+ * U+2028/U+2029 replaced by a space, so it cannot start a line of its own and
+ * pass for a `[mailbox]` line.
+ */
+const plain = (text: string): string => text.replace(/[\p{Cc}\u2028\u2029]/gu, " ");
+
 /** A reply quotes each request it answers: the id, the copy's path, then the capped body. */
 function quoteRequest(request: SentCopy): string {
 	const cut = cap(request.envelope.body, QUOTE_CAP);
 	const body =
 		cut === undefined
 			? request.envelope.body
-			: `${cut}\n[mailbox] Request cut at 2 KiB; the full copy is ${request.path}`;
-	return `[mailbox] Your request ${request.envelope.id}, quoted from ${request.path}:\n${body
+			: `${cut}\n[mailbox] Request cut at 2 KiB; the full copy is ${plain(request.path)}`;
+	return `[mailbox] Your request ${plain(request.envelope.id)}, quoted from ${plain(request.path)}:\n${body
 		.split("\n")
 		.map((line) => `> ${line}`)
 		.join("\n")}`;
@@ -94,7 +102,7 @@ function requestQuotes(me: string, ids: readonly string[]): { requests: SentCopy
 	for (const id of ids) {
 		const copy = copies.get(id);
 		if (copy === undefined) {
-			quotes.push(`[mailbox] Your request ${id} has no copy in sent/; only its id is known.`);
+			quotes.push(`[mailbox] Your request ${plain(id)} has no copy in sent/; only its id is known.`);
 			continue;
 		}
 		requests.push(copy);
@@ -110,8 +118,8 @@ function requestQuotes(me: string, ids: readonly string[]): { requests: SentCopy
  * as a possible injection (spec Q37). Safety lives outside the model.
  */
 function senderLine(address: string, record: RunningRecord | undefined): { line: string; name: string } {
-	const where = record === undefined ? "" : `, working in ${record.cwd}`;
-	const name = label(record ?? { address });
+	const where = record === undefined ? "" : `, working in ${plain(record.cwd)}`;
+	const name = plain(label(record ?? { address }));
 	return { line: `[mailbox] From ${name} (${address}${where}), another Pi session on this machine.`, name };
 }
 
@@ -132,32 +140,30 @@ function inboundText(
 	path: string,
 	quotes: readonly string[],
 	opts: { lateAnswer: boolean; byUser: boolean },
+	senderRecord: RunningRecord | undefined,
 ): string {
 	const { lateAnswer, byUser } = opts;
-	const sender = senderLine(
-		envelope.from,
-		listRunning().find((r) => r.address === envelope.from),
-	);
+	const sender = senderLine(envelope.from, senderRecord);
+	const id = plain(envelope.id);
+	const replyIds = envelope.in_reply_to.map(plain);
 	const header = [sender.line];
 	if (envelope.kind === "request") header.push("Your final answer this turn goes back to it automatically.");
 	if (envelope.kind === "ask")
 		header.push(
-			`It is waiting for your answer to its ask ${envelope.id}. Answer with session_mail_reply (ask ${envelope.id}); otherwise this run's last message is sent as the answer.`,
+			`It is waiting for your answer to its ask ${id}. Answer with session_mail_reply (ask ${id}); otherwise this run's last message is sent as the answer.`,
 		);
 	if (lateAnswer) header.push("It answers an ask of yours that has stopped waiting, so it arrives as a message.");
 	if (envelope.kind === "message")
 		header.push(`It expects no answer; if one is wanted, send it with session_mail_send to ${envelope.from}.`);
 	if (envelope.in_reply_to.length > 0)
-		header.push(
-			`It is a reply to your request${envelope.in_reply_to.length > 1 ? "s" : ""} ${envelope.in_reply_to.join(", ")}.`,
-		);
+		header.push(`It is a reply to your request${envelope.in_reply_to.length > 1 ? "s" : ""} ${replyIds.join(", ")}.`);
 	if (byUser)
 		header.push("The user made that request, typing it with /mailbox or through an extension such as delegate.");
 	if (envelope.in_reply_to.length > 0 && envelope.status !== "done")
-		header.push(`Its status is "${envelope.status}", not "done": it is not an answer.`);
+		header.push(`Its status is "${plain(String(envelope.status))}", not "done": it is not an answer.`);
 	const cut = cap(envelope.body, BODY_CAP);
 	const body =
-		cut === undefined ? envelope.body : `${cut}\n\n[mailbox] Body cut at 32 KiB; the full envelope is ${path}`;
+		cut === undefined ? envelope.body : `${cut}\n\n[mailbox] Body cut at 32 KiB; the full envelope is ${plain(path)}`;
 	return [header.join(" "), ...quotes, body, endLine(sender.name)].join("\n\n");
 }
 
@@ -345,7 +351,13 @@ export default function mailbox(pi: ExtensionAPI) {
 		pi.sendMessage(
 			{
 				customType: CUSTOM_TYPE,
-				content: inboundText(envelope, path, quotes, { lateAnswer, byUser }),
+				content: inboundText(
+					envelope,
+					path,
+					quotes,
+					{ lateAnswer, byUser },
+					listRunning().find((r) => r.address === envelope.from),
+				),
 				display: true,
 				details: { id: envelope.id },
 			},
