@@ -411,9 +411,16 @@ export default function mailbox(pi: ExtensionAPI) {
 			warn(`session id ${JSON.stringify(id)} is not a usable address; the mailbox is off`);
 			return;
 		}
+		try {
+			ensureBoxes(id);
+		} catch (err) {
+			address = undefined;
+			tools?.setAddress(undefined);
+			warn(`mailbox is off: ${(err as Error).message}`);
+			return;
+		}
 		address = id;
 		tools?.setAddress(id);
-		ensureBoxes(id);
 		warnIfLoose(id);
 		name = context.sessionManager.getSessionName?.() || undefined;
 		cwd = context.cwd;

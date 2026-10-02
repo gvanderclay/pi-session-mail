@@ -14,6 +14,9 @@ follows [Semantic Versioning](https://semver.org/).
 - A session warns at start when its own address folder grants group or other
   permission, naming the folder and the `chmod 700` that fixes it. The folder
   is not changed.
+- A session whose state directory cannot be written warns
+  `mailbox: mailbox is off: <reason>` at start and runs without an address,
+  watcher or timer, instead of failing with a raw error and starting half-way.
 
 ### Changed
 

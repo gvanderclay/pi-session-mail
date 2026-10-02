@@ -21,7 +21,7 @@ import { test } from "node:test";
 
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 
-import { box, dir, envelopes, files, newId, session, stateRoot, turn, until } from "./harness.ts";
+import { box, dir, envelopes, files, newId, records, session, stateRoot, turn, until } from "./harness.ts";
 
 const root = stateRoot();
 
@@ -1089,5 +1089,118 @@ test("a delivery that fails after the sender's sent/ copy is written removes the
 	} finally {
 		chmodSync(newBox, 0o700);
 		await a.shutdown();
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Failing filesystems
+
+test("a session whose state directory is unwritable warns that the mailbox is off and gets no address", {
+	skip: root0,
+}, async () => {
+	const saved = process.env.XDG_STATE_HOME;
+	const readOnly = join(dir, "read-only-state");
+	mkdirSync(readOnly, { recursive: true });
+	chmodSync(readOnly, 0o500);
+	const a = session(newId("a"));
+	try {
+		process.env.XDG_STATE_HOME = readOnly;
+		await a.start();
+		assert.equal(a.warnings.length, 1);
+		assert.match(a.warnings[0], /^mailbox: mailbox is off: .*EACCES/);
+		assert.equal(a.status(), undefined);
+		assert.deepEqual(records().get(a.id), undefined);
+		assert.deepEqual(readdirSync(readOnly), []);
+	} finally {
+		process.env.XDG_STATE_HOME = saved;
+		chmodSync(readOnly, 0o700);
+		await a.shutdown();
+	}
+});
+
+test("two scanners claiming one envelope deliver it exactly once", async () => {
+	const id = newId("a");
+	const first = session(id);
+	const second = session(id);
+	await first.start();
+	await second.start();
+	const from = newId("b");
+	const plant = (name: string, body: string) =>
+		writeFileSync(
+			join(box(id, "new"), name),
+			JSON.stringify({ id: name, from, to: id, in_reply_to: [], status: "", ts: "", body, kind: "message", hops: 0 }),
+		);
+	plant("000000000000001-one.json", "body-alpha");
+	plant("000000000000002-two.json", "body-beta");
+	// While `first` delivers body-alpha, `second` scans and claims body-beta from under it.
+	const deliver = first.pi.sendMessage;
+	first.pi.sendMessage = (message, options) => {
+		deliver(message, options);
+		first.pi.sendMessage = deliver;
+		second.events.emit("message:scan", {});
+	};
+	first.events.emit("message:scan", {});
+	const bodies = [...first.sent, ...second.sent].map((m) => m.message.content);
+	assert.equal(bodies.length, 2);
+	assert.equal(bodies.filter((b) => b.includes("body-alpha")).length, 1);
+	assert.equal(bodies.filter((b) => b.includes("body-beta")).length, 1);
+	assert.equal(first.sent.length, 1);
+	assert.equal(second.sent.length, 1);
+	assert.deepEqual(files(id, "new"), []);
+	assert.equal(files(id, "cur").length, 2);
+	await first.shutdown();
+	await second.shutdown();
+});
+
+test("a reply that fails at settle warns, naming the recipient", { skip: root0 }, async () => {
+	const a = session(newId("a"));
+	const b = newId("b");
+	await a.start();
+	mkdirSync(box(b, "new"), { recursive: true, mode: 0o700 });
+	writeFileSync(
+		join(box(a.id, "new"), "000000000000001-req.json"),
+		JSON.stringify({
+			id: "req",
+			from: b,
+			to: a.id,
+			in_reply_to: [],
+			status: "",
+			ts: "",
+			body: "q",
+			kind: "request",
+			hops: 0,
+		}),
+	);
+	await until(() => a.sent.length === 1, "A to receive the request");
+	const newBox = box(b, "new");
+	chmodSync(newBox, 0o500);
+	try {
+		await a.answer("the answer");
+		assert.equal(a.warnings.length, 1);
+		assert.match(a.warnings[0], new RegExp(`^mailbox: could not reply to ${b}: .*EACCES`));
+		assert.deepEqual(files(b, "new"), []);
+	} finally {
+		chmodSync(newBox, 0o700);
+		await a.shutdown();
+	}
+});
+
+test("a running record that cannot be written warns", { skip: root0 }, async () => {
+	const saved = process.env.XDG_STATE_HOME;
+	const state = join(dir, "record-state");
+	const running = join(state, "pi-session-mail", "running");
+	mkdirSync(running, { recursive: true, mode: 0o700 });
+	chmodSync(running, 0o500);
+	const a = session(newId("a"));
+	try {
+		process.env.XDG_STATE_HOME = state;
+		await a.start();
+		assert.ok(a.warnings.length > 0);
+		assert.match(a.warnings[0], /^mailbox: could not write this session's running record: .*EACCES/);
+		assert.ok(existsSync(box(a.id, "new")));
+	} finally {
+		chmodSync(running, 0o700);
+		await a.shutdown();
+		process.env.XDG_STATE_HOME = saved;
 	}
 });
