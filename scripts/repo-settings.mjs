@@ -1,5 +1,6 @@
 // Makes the GitHub repository match .github/repo-settings.json. `repository`
-// goes as-is to the repository update API; each ruleset is created, or
+// goes as-is to the repository update API; `private_vulnerability_reporting`
+// turns private vulnerability reporting on or off; each ruleset is created, or
 // replaced whole, by name; a ruleset the file does not name is deleted, so the
 // file is the whole truth. Every run sends everything, so it is safe to repeat.
 // Needs gh, logged in as an admin of the repository.
@@ -26,6 +27,16 @@ function act(label, method, path, body) {
 const repo = gh(["repo", "view", "--json", "nameWithOwner"]).nameWithOwner;
 act(`update the settings of ${repo}`, "PATCH", `repos/${repo}`, desired.repository);
 
+const reporting = desired.private_vulnerability_reporting
+	? { verb: "enable", method: "PUT" }
+	: { verb: "disable", method: "DELETE" };
+const reportingPath = `repos/${repo}/private-vulnerability-reporting`;
+act(
+	`${reporting.verb} private vulnerability reporting (${reporting.method} ${reportingPath})`,
+	reporting.method,
+	reportingPath,
+);
+
 // ponytail: one page of 100 rulesets; paginate if a repository ever has more.
 const existing = new Map(
 	gh(["api", `repos/${repo}/rulesets?includes_parents=false&per_page=100`]).map(
@@ -33,6 +44,11 @@ const existing = new Map(
 	),
 );
 for (const ruleset of desired.rulesets) {
+	const required = ruleset.rules.find((rule) => rule.type === "required_status_checks");
+	if (required) {
+		const names = required.parameters.required_status_checks.map((check) => check.context);
+		console.log(`ruleset "${ruleset.name}" requires: ${names.join(", ")}`);
+	}
 	const id = existing.get(ruleset.name);
 	existing.delete(ruleset.name);
 	if (id === undefined) {

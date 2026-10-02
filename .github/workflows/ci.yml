@@ -30,6 +30,44 @@ jobs:
           unset PI_CODING_AGENT_DIR XDG_STATE_HOME
           pnpm test
 
+  # Same steps on macOS, where the mail root and the temp folders behave
+  # differently. The job name is a required check in repo-settings.json.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - name: test
+        run: |
+          export HOME="$(mktemp -d)"
+          unset PI_CODING_AGENT_DIR XDG_STATE_HOME
+          pnpm test
+
+  # Loads the packed package in a real Pi (scripts/smoke.mjs; no API key, no
+  # model). 1.0.0 matches the @earendil-works/pi-coding-agent devDependency
+  # and is required; "latest" only reports upstream changes.
+  smoke:
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.pi == 'latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        pi: ["1.0.0", "latest"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+      - run: npm install -g @earendil-works/pi-coding-agent@${{ matrix.pi }}
+      - run: node scripts/smoke.mjs
+
   pack:
     runs-on: ubuntu-latest
     steps:

@@ -8,6 +8,7 @@
 		"squash_merge_commit_title": "PR_TITLE",
 		"squash_merge_commit_message": "BLANK"
 	},
+	"private_vulnerability_reporting": true,
 	"rulesets": [
 		{
 			"name": "main: pull requests only",
@@ -38,6 +39,8 @@
 						"required_status_checks": [
 							{ "context": "check (22.19.x)", "integration_id": 15368 },
 							{ "context": "check (24.x)", "integration_id": 15368 },
+							{ "context": "macos", "integration_id": 15368 },
+							{ "context": "smoke (1.0.0)", "integration_id": 15368 },
 							{ "context": "pack", "integration_id": 15368 }
 						]
 					}

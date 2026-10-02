@@ -12,6 +12,14 @@ pnpm install
 pnpm check   # lint, typecheck and tests, as CI runs them
 ```
 
+`node scripts/smoke.mjs` packs the package, installs it in the `pi` on your
+`PATH` and sends one message with `/mailbox`. It needs no API key or model, and
+it uses temporary `HOME`, agent and state folders, not your mail root. CI runs
+it against Pi 1.0.0 (required) and the latest Pi (reporting only). Run it after
+changing `package.json` `pi` or `files`.
+
+CI runs `pnpm check` on Node 22.19 and 24 on Linux and on Node 24 on macOS.
+
 The tests under `test/` are not loaded by Pi and not in the npm tarball. Run
 one test file with `node --test test/hooks.test.ts`. To try a change in Pi, load
 your checkout: `pi -e <path to this checkout>`.

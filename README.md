@@ -10,12 +10,8 @@ automatically.
 
 ## Install
 
-You need Pi and a writable state directory. Pi supplies the peer dependencies
-`typebox` (the tools' parameter schemas) and `@earendil-works/pi-coding-agent`
-(the extension types, and `getAgentDir`, which finds `session-mail.json`). The
-extension calls `pi.events`, `pi.sendMessage`, `pi.on`, `pi.registerCommand`
-and `pi.registerTool`, so your Pi must provide them. The package has no
-runtime dependencies and no build step.
+Requires Pi 0.80.4 or later; tested with 1.0.0. You also need a writable
+state directory. The package has no runtime dependencies and no build step.
 
 Install the package from npm:
 
