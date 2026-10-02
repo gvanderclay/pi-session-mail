@@ -6,6 +6,11 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The README links `CONTRIBUTING.md` and `SECURITY.md` on GitHub, since
+  neither is in the npm package and their relative links 404 on pi.dev.
+
 ## [0.2.1] - 2026-10-02
 
 ### Fixed
