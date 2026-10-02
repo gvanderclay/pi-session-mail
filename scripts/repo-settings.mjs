@@ -44,6 +44,11 @@ const existing = new Map(
 	),
 );
 for (const ruleset of desired.rulesets) {
+	const required = ruleset.rules.find((rule) => rule.type === "required_status_checks");
+	if (required) {
+		const names = required.parameters.required_status_checks.map((check) => check.context);
+		console.log(`ruleset "${ruleset.name}" requires: ${names.join(", ")}`);
+	}
 	const id = existing.get(ruleset.name);
 	existing.delete(ruleset.name);
 	if (id === undefined) {

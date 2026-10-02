@@ -14,6 +14,9 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Releases are published by the release workflow, with npm provenance, only
+  after lint, typecheck and tests pass on Node 22.19 and 24 and a smoke test
+  loads the packed package in Pi 1.0.0.
 - The package entry is now `src/index.ts`; the sources moved into `src/`.
 
 ## [0.1.0] - 2026-10-02

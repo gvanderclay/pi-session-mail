@@ -17,6 +17,10 @@ inbox: the `/mailbox` command, the `session_mail_*` tools, and the
 - `pnpm check` runs lint (`biome ci .`), typecheck (`tsc -p .`) and the
   tests. Run it before every commit; CI runs the same on Node 22.19 and 24,
   with a fresh `HOME` and no `PI_CODING_AGENT_DIR`.
+- `node scripts/smoke.mjs` loads the packed package in the `pi` on `PATH` and
+  sends one `/mailbox` message, with no API key or model and temporary `HOME`,
+  agent and state folders. CI runs it on Pi 1.0.0 (required) and the latest Pi.
+  Run it after changing `package.json` `pi` or `files`.
 - A single file: `node --test test/hooks.test.ts`.
 - `node scripts/check-pack.mjs` after changing `package.json` `files` or adding
   a source file. `files` lists `src`, so every `.ts` file in `src/` is published.
