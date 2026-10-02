@@ -9,11 +9,13 @@ import {
 	chmodSync,
 	existsSync,
 	mkdirSync,
+	mkdtempSync,
 	readdirSync,
 	readFileSync,
 	rmSync,
 	statSync,
 	symlinkSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -21,6 +23,7 @@ import { test } from "node:test";
 
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 
+import { pruneClosed } from "../src/store.ts";
 import { box, dir, envelopes, files, newId, records, session, stateRoot, turn, until } from "./harness.ts";
 
 const root = stateRoot();
@@ -1301,3 +1304,168 @@ test("a running record that cannot be written warns", { skip: root0 }, async () 
 		process.env.XDG_STATE_HOME = saved;
 	}
 });
+
+// ---------------------------------------------------------------------------
+// Pruning
+
+const DAY_S = 24 * 60 * 60;
+const BOX_NAMES = ["tmp", "new", "cur", "sent"] as const;
+
+/** Set the modification time of `path` to `days` days ago. */
+function age(path: string, days: number) {
+	const when = Date.now() / 1000 - days * DAY_S;
+	utimesSync(path, when, when);
+}
+
+/** Run `body` against an empty mail root of its own, so a direct prune sees only what the test made. */
+function withFreshRoot(body: () => void) {
+	const saved = process.env.XDG_STATE_HOME;
+	process.env.XDG_STATE_HOME = mkdtempSync(join(dir, "fresh-"));
+	try {
+		body();
+	} finally {
+		process.env.XDG_STATE_HOME = saved;
+	}
+}
+
+/** An address folder with its four boxes, every one last touched `days` days ago; `unread` leaves a file in new/. */
+function folder(address: string, days: number, unread = false) {
+	for (const sub of BOX_NAMES) mkdirSync(box(address, sub), { recursive: true, mode: 0o700 });
+	if (unread) writeFileSync(join(box(address, "new"), "000000000000001-x.json"), "{}");
+	for (const sub of BOX_NAMES) age(box(address, sub), days);
+	age(join(stateRoot(), address), days);
+	return join(stateRoot(), address);
+}
+
+test("a session start prunes closed sessions' folders idle for over 30 days and keeps the rest", async () => {
+	const old = folder(newId(), 40);
+	const recent = folder(newId(), 5);
+	const unread = folder(newId(), 40, true);
+	const mixed = folder(newId(), 40);
+	age(join(mixed, "cur"), 2); // one recently touched box keeps the folder
+	const live = session(newId(), { name: "alive" });
+	await live.start();
+	const liveFolder = join(root, live.id);
+	for (const sub of BOX_NAMES) age(join(liveFolder, sub), 40);
+	age(liveFolder, 40);
+	const own = session(newId());
+	const ownFolder = join(root, own.id);
+	const runningDir = join(root, "running");
+	age(runningDir, 400);
+	await own.sessionStart();
+	for (const sub of BOX_NAMES) age(join(ownFolder, sub), 40);
+	age(ownFolder, 40);
+	await turn();
+	await turn();
+	assert.ok(!existsSync(old), "an old closed folder is pruned");
+	assert.ok(existsSync(recent), "a recent one stays");
+	assert.ok(existsSync(unread), "unread mail keeps an old folder");
+	assert.ok(existsSync(mixed), "the newest box decides the folder's age");
+	assert.ok(existsSync(liveFolder), "a running session's folder stays");
+	assert.ok(existsSync(ownFolder), "this session's own folder stays");
+	assert.ok(existsSync(runningDir), "running/ is never pruned");
+	assert.deepEqual(own.warnings, []);
+	await own.shutdown();
+	await live.shutdown();
+});
+
+test("pruning never follows a symlink or touches a name that is no address", async () => {
+	const outside = join(dir, "outside");
+	mkdirSync(join(outside, "new"), { recursive: true });
+	age(join(outside, "new"), 400);
+	age(outside, 400);
+	const link = join(root, newId());
+	symlinkSync(outside, link);
+	const file = join(root, newId());
+	writeFileSync(file, "x");
+	age(file, 400);
+	const odd = join(root, "not.an.address");
+	mkdirSync(odd, { recursive: true });
+	age(odd, 400);
+	const a = session(newId());
+	await a.mailbox("prune");
+	assert.ok(existsSync(join(outside, "new")), "the symlink's target is untouched");
+	assert.ok(existsSync(link));
+	assert.ok(existsSync(file));
+	assert.ok(existsSync(odd));
+	rmSync(link);
+	rmSync(file);
+	rmSync(odd, { recursive: true });
+});
+
+test("/mailbox prune removes closed sessions' folders of any age, keeps unread mail, and says how many", async () => {
+	const fresh = folder(newId(), 0);
+	const old = folder(newId(), 90);
+	const unread = folder(newId(), 90, true);
+	const live = session(newId());
+	await live.start();
+	const a = session(newId());
+	await a.start();
+	await a.mailbox("prune");
+	assert.ok(a.notes.at(-1)?.startsWith("Removed "));
+	assert.ok(!existsSync(fresh) && !existsSync(old));
+	assert.ok(existsSync(unread));
+	assert.ok(existsSync(join(root, live.id)), "a running session's folder stays");
+	assert.ok(existsSync(join(root, a.id)), "its own folder stays");
+	assert.ok(existsSync(join(root, "running")));
+	rmSync(unread, { recursive: true });
+	const one = folder(newId(), 1);
+	const two = folder(newId(), 1);
+	await a.mailbox("prune");
+	assert.equal(a.notes.at(-1), "Removed 2 mailbox folders of closed sessions");
+	assert.ok(!existsSync(one) && !existsSync(two));
+	await a.shutdown();
+	await live.shutdown();
+});
+
+test("/mailbox prune <text> is still a send to a session named or prefixed prune", async () => {
+	const target = session(newId(), { name: "prune" });
+	await target.start();
+	const a = session(newId());
+	await a.mailbox("prune hello there");
+	assert.equal(envelopes(target.id, "new").length + envelopes(target.id, "cur").length, 1);
+	assert.equal(a.notes.at(-1)?.startsWith("Sent "), true);
+	await target.shutdown();
+});
+
+test("pruning puts back mail that reaches new/ between the check and the removal, and keeps the folder", () =>
+	withFreshRoot(() => {
+		const address = newId();
+		const path = folder(address, 90);
+		let planted = "";
+		const removed = pruneClosed({
+			isRunning: () => false,
+			cutoffMs: Date.now(),
+			beforeRemove: (name) => {
+				if (name !== address) return;
+				planted = join(box(address, "new"), "000000000000002-late.json");
+				writeFileSync(planted, "{}"); // a sender's rename landing in the window
+			},
+		});
+		assert.equal(removed, 0);
+		assert.ok(existsSync(planted), "the late mail is in the address's new/");
+		assert.ok(existsSync(join(path, "cur")), "the boxes exist again");
+		assert.deepEqual(
+			readdirSync(stateRoot()).filter((name) => name.startsWith(".")),
+			[],
+			"no folder is left aside",
+		);
+		rmSync(path, { recursive: true });
+	}));
+
+test("a folder left aside by a crash is removed when its new/ is empty and restored when it is not", () =>
+	withFreshRoot(() => {
+		const empty = newId();
+		const full = newId();
+		const leftover = (address: string) => join(stateRoot(), `.pruning.${address}.${newId()}`);
+		const emptyAside = leftover(empty);
+		const fullAside = leftover(full);
+		mkdirSync(join(emptyAside, "new"), { recursive: true });
+		mkdirSync(join(fullAside, "new"), { recursive: true });
+		writeFileSync(join(fullAside, "new", "000000000000003-kept.json"), "{}");
+		assert.equal(pruneClosed({ isRunning: () => false, cutoffMs: 0 }), 1);
+		assert.ok(!existsSync(emptyAside));
+		assert.ok(!existsSync(fullAside));
+		assert.deepEqual(files(full, "new"), ["000000000000003-kept.json"]);
+		rmSync(join(stateRoot(), full), { recursive: true });
+	}));

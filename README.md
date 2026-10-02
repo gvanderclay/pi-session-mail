@@ -239,6 +239,23 @@ other mail, so a chain that reaches the limit is refused there as a loop.
 The limit is a loop guard, not a security boundary: a hand-written envelope
 can claim any `hops`.
 
+## Pruning
+
+Folders of closed sessions would otherwise pile up in the mail root. At session
+start, a session removes an address folder when all of these hold:
+
+- it is not this session's, and no running session has that address;
+- nothing is waiting in its `new/`, so unread mail is never deleted;
+- its last activity, the newest change to the folder or its four boxes, is
+  older than `pruneAfterDays` days.
+
+Only real folders named like an address are considered; `running/`, symlinks
+and other names are left alone. The work runs after `session_start` returns.
+
+To clean up at once, type `/mailbox prune`. It applies the same rules without
+the age limit and reports `Removed <N> mailbox folders of closed sessions`.
+`/mailbox prune <text>` is still a message to a session named `prune`.
+
 ## Configuration
 
 `pi-session-mail` names no model. It reads one optional settings file,
@@ -246,15 +263,18 @@ can claim any `hops`.
 (`PI_CODING_AGENT_DIR`, or `~/.pi/agent`), so each agent directory sets its own:
 
 ```json
-{ "hopLimit": 5 }
+{ "hopLimit": 5, "pruneAfterDays": 30 }
 ```
 
 | Key | Effect |
 | --- | --- |
 | `hopLimit` | A positive integer: how many hops a chain of sessions waking each other may reach before `session_mail_send` and `session_mail_ask` are refused. Default 5. |
+| `pruneAfterDays` | A positive integer: how many days a closed session's mailbox folder is kept before it is [pruned](#pruning). Default 30. |
 
-The file is read at each send. A missing file, or one without `hopLimit`, means
-5. An unreadable or invalid file also means 5, with one warning per session.
+The file is read at each send and at session start. A missing file, or one
+without a key, means that key's default. An unreadable or invalid file, or an
+invalid value, also means the default (5 hops, 30 days), with one warning per
+session.
 
 The only environment variable it reads is the standard `XDG_STATE_HOME`, at
 every call, to place the mail root (see [How mail works](#how-mail-works)). It
@@ -421,7 +441,7 @@ root, and other extensions depend on its hooks, so these are stable:
   [Envelopes](#envelopes).
 - The names of the tools (`session_mail_list`, `session_mail_send`,
   `session_mail_ask`, `session_mail_reply`) and of the `/mailbox` command.
-- The keys of `session-mail.json`, today only `hopLimit`.
+- The keys of `session-mail.json`, today `hopLimit` and `pruneAfterDays`.
 
 Changing any of them needs a major version from 1.0 on, and a minor version
 while the package is at 0.x.

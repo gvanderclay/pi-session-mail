@@ -38,15 +38,17 @@ import {
 	findSent,
 	isAddress,
 	listNew,
+	pruneClosed,
 	readEnvelope,
 	type SentCopy,
 	send,
 } from "./store.ts";
-import { registerTools, type Tools } from "./tools.ts";
+import { readSettings, registerTools, type Tools } from "./tools.ts";
 
 const CUSTOM_TYPE = "mailbox";
 const STATUS_KEY = "mailbox";
 /** Fallback rescan interval; `fs.watch` on macOS drops and coalesces events. */
+const DAY_MS = 24 * 60 * 60 * 1000;
 const POLL_MS = 1000;
 /** Inbound bodies are cut at this many UTF-8 bytes. */
 const BODY_CAP = 32 * 1024;
@@ -233,8 +235,8 @@ export default function mailbox(pi: ExtensionAPI) {
 	 * steered into it. Mail sent from the turn carries it.
 	 */
 	let hops = 0;
-	/** Whether this session has already warned about a broken `session-mail.json`. */
-	let configWarned = false;
+	/** The problems with `session-mail.json` this session has already warned about. */
+	let configWarned = new Set<string>();
 	/** What this session's running-session record says. */
 	let name: string | undefined;
 	let cwd = "";
@@ -394,6 +396,29 @@ export default function mailbox(pi: ExtensionAPI) {
 		payload.scanned = true;
 	});
 
+	/** Warn about a problem with `session-mail.json`, once per session. */
+	function configProblem(message: string) {
+		if (configWarned.has(message)) return;
+		configWarned.add(message);
+		warn(message);
+	}
+
+	/** Whether a live session has an address, from one listing of the running records. */
+	function runningCheck(): (address: string) => boolean {
+		const live = new Set(listRunning().map((record) => record.address));
+		return (address) => live.has(address);
+	}
+
+	/** Remove closed sessions' folders that are older than `pruneAfterDays`; a failure warns and never throws. */
+	function pruneOld(me: string) {
+		try {
+			const { pruneAfterDays } = readSettings(configProblem);
+			pruneClosed({ own: me, isRunning: runningCheck(), cutoffMs: Date.now() - pruneAfterDays * DAY_MS });
+		} catch (err) {
+			warn(`could not prune old mailbox folders: ${(err as Error).message}`);
+		}
+	}
+
 	pi.on("session_start", async (_event, context) => {
 		stop();
 		ctx = context;
@@ -407,7 +432,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		hops = 0;
 		tools?.abandonAsk();
 		waitingOn = "";
-		configWarned = false;
+		configWarned = new Set();
 		const id = context.sessionManager.getSessionId();
 		if (!isAddress(id)) {
 			address = undefined;
@@ -439,6 +464,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		pendingScan = setImmediate(() => {
 			pendingScan = undefined;
 			scan();
+			pruneOld(id);
 		});
 		pendingScan.unref?.();
 		try {
@@ -562,15 +588,12 @@ export default function mailbox(pi: ExtensionAPI) {
 			announce();
 		},
 		hops: () => hops,
-		configProblem: (message) => {
-			if (configWarned) return;
-			configWarned = true;
-			warn(message);
-		},
+		configProblem,
 	});
 
 	pi.registerCommand("mailbox", {
-		description: "Show this session's mailbox address and name, or send a request: /mailbox <name or id> <text>",
+		description:
+			"Show this session's mailbox address and name, send a request: /mailbox <name or id> <text>, or remove closed sessions' empty mailbox folders: /mailbox prune",
 		handler: async (args, context) => {
 			const me = context.sessionManager.getSessionId();
 			const trimmed = args.trim();
@@ -580,6 +603,15 @@ export default function mailbox(pi: ExtensionAPI) {
 					`Mailbox address: ${me}\nName: ${current === undefined ? `none; other sessions see ${label({ address: me })} (set one with /name)` : current}`,
 					"info",
 				);
+				return;
+			}
+			if (trimmed === "prune") {
+				try {
+					const removed = pruneClosed({ own: me, isRunning: runningCheck() });
+					context.ui.notify(`Removed ${removed} mailbox folders of closed sessions`, "info");
+				} catch (err) {
+					context.ui.notify(`mailbox: ${(err as Error).message}`, "error");
+				}
 				return;
 			}
 			const match = /^(\S+)\s+([\s\S]+)$/.exec(trimmed);

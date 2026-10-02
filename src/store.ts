@@ -252,3 +252,135 @@ export function diskCounts(address: string): { unclaimed: number; read: number; 
 	).length;
 	return { unclaimed: listNew(address).length, read: cur.length, awaiting };
 }
+
+// ---------------------------------------------------------------------------
+// Pruning
+
+/** What decides whether an address folder is pruned. */
+export type FolderFacts = {
+	own: boolean;
+	running: boolean;
+	/** Anything at all waiting in `new/`. */
+	unread: boolean;
+	/** The newest modification time among the folder and its four boxes, in ms. */
+	lastActivityMs: number;
+};
+
+/**
+ * Whether a folder may be removed: it is not this session's, no live session
+ * has it, nothing waits in `new/`, and (given a `cutoffMs`) its last activity
+ * is older than the cutoff. Without a cutoff age does not matter.
+ */
+export function shouldPrune(facts: FolderFacts, cutoffMs?: number): boolean {
+	if (facts.own || facts.running || facts.unread) return false;
+	return cutoffMs === undefined || facts.lastActivityMs < cutoffMs;
+}
+
+/** The directory `running/` holds the running-session records in; it is never pruned. */
+const RUNNING = "running";
+
+/** A folder being pruned is first renamed to this, which is no address, so a send makes a fresh folder. */
+const ASIDE = /^\.pruning\.([A-Za-z0-9_-]+)\.[0-9a-f-]{36}$/;
+
+const isDirectory = (path: string): boolean => {
+	try {
+		return lstatSync(path).isDirectory();
+	} catch {
+		return false;
+	}
+};
+
+/** Names in `path`; undefined when it cannot be listed. */
+function namesIn(path: string): string[] | undefined {
+	try {
+		return readdirSync(path);
+	} catch (err) {
+		return (err as NodeJS.ErrnoException).code === "ENOENT" ? [] : undefined;
+	}
+}
+
+function lastActivity(folder: string): number {
+	let newest = 0;
+	for (const path of [folder, ...BOXES.map((box) => join(folder, box))]) {
+		try {
+			newest = Math.max(newest, lstatSync(path).mtimeMs);
+		} catch {
+			// a missing box has no activity
+		}
+	}
+	return newest;
+}
+
+/**
+ * Remove a folder that was renamed aside, unless mail reached its `new/`
+ * after the check: then everything in its boxes is moved back into the
+ * address's own boxes (made again if need be) and the folder is kept. True
+ * when the folder was removed.
+ */
+function finishAside(aside: string, address: string): boolean {
+	const waiting = namesIn(join(aside, "new"));
+	if (waiting === undefined) return false;
+	if (waiting.length === 0) {
+		rmSync(aside, { recursive: true, force: true });
+		return true;
+	}
+	ensureBoxes(address);
+	// `new/` first, so the mail is back before anything else is.
+	for (const box of ["new", "cur", "sent", "tmp"] as const)
+		for (const name of namesIn(join(aside, box)) ?? [])
+			renameSync(join(aside, box, name), join(boxPath(address, box), name));
+	rmSync(aside, { recursive: true, force: true });
+	return false;
+}
+
+/** What `pruneClosed` is given. */
+export type PruneOptions = {
+	/** This session's address, which is never pruned. */
+	own?: string;
+	/** Whether a live session has this address. */
+	isRunning: (address: string) => boolean;
+	/** Only folders with no activity since this time (ms since the epoch) are removed; none means any age. */
+	cutoffMs?: number;
+	/** Called between a folder's check and its removal; for tests of that window. */
+	beforeRemove?: (address: string) => void;
+};
+
+/**
+ * Remove the folders of closed sessions that hold no unread mail, and return
+ * how many were removed. Only real directories named like an address are
+ * considered (never `running/`, a symlink, or a file). A folder is first
+ * renamed to a name that is no address, atomically, so a send arriving after
+ * the check recreates a fresh folder instead of writing into one about to
+ * go; mail that reached its `new/` before the rename is moved back and the
+ * folder is kept. A folder left aside by a crash is finished the same way.
+ */
+export function pruneClosed(options: PruneOptions): number {
+	const root = mailRoot();
+	const names = namesIn(root);
+	if (names === undefined) throw new Error(`cannot list ${root}`);
+	return names.filter((name) => pruneOne(root, name, options)).length;
+}
+
+/** Prune the entry `name` of the mail root if it is a candidate; true when a folder was removed. */
+function pruneOne(root: string, name: string, options: PruneOptions): boolean {
+	const path = join(root, name);
+	const leftover = ASIDE.exec(name);
+	if (leftover !== null) return isDirectory(path) && finishAside(path, leftover[1]);
+	if (name === RUNNING || !isAddress(name) || !isDirectory(path)) return false;
+	const unread = namesIn(join(path, "new"));
+	const facts: FolderFacts = {
+		own: name === options.own,
+		running: options.isRunning(name),
+		unread: unread === undefined || unread.length > 0,
+		lastActivityMs: lastActivity(path),
+	};
+	if (!shouldPrune(facts, options.cutoffMs)) return false;
+	options.beforeRemove?.(name);
+	const aside = join(root, `.pruning.${name}.${randomUUID()}`);
+	try {
+		renameSync(path, aside);
+	} catch {
+		return false; // gone or busy: leave it
+	}
+	return finishAside(aside, name);
+}

@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
+import { DEFAULT_HOP_LIMIT, DEFAULT_PRUNE_AFTER_DAYS, parseConfig } from "./config.ts";
 import { label, listRunning, type RunningRecord, resolveTo } from "./running.ts";
 import { type Envelope, send } from "./store.ts";
 
@@ -87,58 +88,30 @@ const NOT_AN_ASK: Record<Exclude<Envelope["kind"], "ask">, string> = {
 	reply: "A reply is never answered.",
 };
 
-/** The hop limit when `session-mail.json` is missing or broken (spec Q14). */
-const DEFAULT_HOP_LIMIT = 5;
-
-/** What `session-mail.json` says about the hop limit, and the problem to report, if any. */
-type HopConfig = { limit: number; problem?: string };
-
 /**
- * The hop limit in the text of `session-mail.json`; `undefined` text is a
- * missing file. A file without `hopLimit` means the default; an invalid one
- * means the default and a problem report.
+ * The settings from `<agent dir>/session-mail.json`, read at each call; each
+ * problem goes to `onProblem`, which the extension shows once per session.
  */
-function parseHopLimit(text: string | undefined, path: string): HopConfig {
-	const fallback = (problem: string): HopConfig => ({ limit: DEFAULT_HOP_LIMIT, problem });
-	if (text === undefined) return { limit: DEFAULT_HOP_LIMIT };
-	let config: unknown;
-	try {
-		config = JSON.parse(text);
-	} catch (err) {
-		return fallback(`${path} is not valid JSON (${(err as Error).message}); using the hop limit ${DEFAULT_HOP_LIMIT}`);
-	}
-	if (typeof config !== "object" || config === null || Array.isArray(config))
-		return fallback(`${path} is not a JSON object; using the hop limit ${DEFAULT_HOP_LIMIT}`);
-	const limit = (config as { hopLimit?: unknown }).hopLimit;
-	if (limit === undefined) return { limit: DEFAULT_HOP_LIMIT };
-	if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1)
-		return fallback(
-			`hopLimit in ${path} must be a positive integer, not ${JSON.stringify(limit)}; using ${DEFAULT_HOP_LIMIT}`,
-		);
-	return { limit };
-}
-
-/** `hopLimit` from `<agent dir>/session-mail.json`, read at each send; problems go to `hooks`. */
-function hopLimit(hooks: ToolHooks): number {
+export function readSettings(onProblem: (message: string) => void): { hopLimit: number; pruneAfterDays: number } {
 	const path = join(getAgentDir(), "session-mail.json");
 	let text: string | undefined;
 	try {
 		text = readFileSync(path, "utf8");
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code !== "ENOENT")
-			hooks.configProblem(
-				`could not read ${path} (${(err as Error).message}); using the hop limit ${DEFAULT_HOP_LIMIT}`,
+			onProblem(
+				`could not read ${path} (${(err as Error).message}); using the hop limit ${DEFAULT_HOP_LIMIT} and pruning after ${DEFAULT_PRUNE_AFTER_DAYS} days`,
 			);
-		return DEFAULT_HOP_LIMIT;
+		text = undefined;
 	}
-	const { limit, problem } = parseHopLimit(text, path);
-	if (problem !== undefined) hooks.configProblem(problem);
-	return limit;
+	const { problems, ...settings } = parseConfig(text, path);
+	for (const problem of problems) onProblem(problem);
+	return settings;
 }
 
 /** Refuse, before anything is written, once the turn's hop count has reached the limit. */
 function checkHops(hops: number, hooks: ToolHooks): void {
-	const limit = hopLimit(hooks);
+	const limit = readSettings(hooks.configProblem).hopLimit;
 	if (hops < limit) return;
 	throw new Error(
 		`nothing was sent: this turn is ${hops} hops into a chain of sessions waking each other with nobody typing, and the hop limit of ${limit} is reached. A person typing in either session starts the count again.`,

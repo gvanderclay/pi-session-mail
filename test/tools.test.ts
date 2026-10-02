@@ -622,6 +622,34 @@ for (const [what, text] of [
 	});
 }
 
+for (const [what, text] of [
+	["not JSON", "{ pruneAfterDays: 2"],
+	["a zero pruneAfterDays", JSON.stringify({ pruneAfterDays: 0 })],
+	["a fractional pruneAfterDays", JSON.stringify({ pruneAfterDays: 1.5 })],
+	["a string pruneAfterDays", JSON.stringify({ pruneAfterDays: "7" })],
+] as const) {
+	test(`a session-mail.json that is ${what} means 30 days, with exactly one warning across the start and two sends`, async () => {
+		await withConfig(text, async () => {
+			const s = await atHops(1);
+			await until(() => s.warnings.length > 0, "the prune at session start to read the settings");
+			await s.toolCall("session_mail_send", { to: newId(), message: "first" });
+			await s.toolCall("session_mail_send", { to: newId(), message: "second" });
+			assert.equal(s.warnings.length, 1);
+			assert.match(s.warnings[0], /session-mail\.json[\s\S]*30/);
+			await s.shutdown();
+		});
+	});
+}
+
+test("a valid pruneAfterDays gives no warning", async () => {
+	await withConfig(JSON.stringify({ pruneAfterDays: 7 }), async () => {
+		const s = await atHops(1);
+		await s.toolCall("session_mail_send", { to: newId(), message: "hi" });
+		assert.deepEqual(s.warnings, []);
+		await s.shutdown();
+	});
+});
+
 // ---------------------------------------------------------------------------
 // session_mail_ask
 
