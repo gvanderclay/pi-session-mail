@@ -21,7 +21,6 @@ follows [Semantic Versioning](https://semver.org/).
   `0644` under the usual umask.
 - A mail root that already existed with looser permissions is set to `0700` at
   session start.
-
 - Releases are published by the release workflow, with npm provenance, only
   after lint, typecheck and tests pass on Node 22.19 and 24 and a smoke test
   loads the packed package in Pi 1.0.0.
