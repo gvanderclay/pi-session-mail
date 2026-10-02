@@ -1,5 +1,6 @@
 // Makes the GitHub repository match .github/repo-settings.json. `repository`
-// goes as-is to the repository update API; each ruleset is created, or
+// goes as-is to the repository update API; `private_vulnerability_reporting`
+// turns private vulnerability reporting on or off; each ruleset is created, or
 // replaced whole, by name; a ruleset the file does not name is deleted, so the
 // file is the whole truth. Every run sends everything, so it is safe to repeat.
 // Needs gh, logged in as an admin of the repository.
@@ -25,6 +26,12 @@ function act(label, method, path, body) {
 
 const repo = gh(["repo", "view", "--json", "nameWithOwner"]).nameWithOwner;
 act(`update the settings of ${repo}`, "PATCH", `repos/${repo}`, desired.repository);
+
+act(
+	`${desired.private_vulnerability_reporting ? "enable" : "disable"} private vulnerability reporting`,
+	desired.private_vulnerability_reporting ? "PUT" : "DELETE",
+	`repos/${repo}/private-vulnerability-reporting`,
+);
 
 // ponytail: one page of 100 rulesets; paginate if a repository ever has more.
 const existing = new Map(

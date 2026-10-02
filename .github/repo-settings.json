@@ -8,6 +8,7 @@
 		"squash_merge_commit_title": "PR_TITLE",
 		"squash_merge_commit_message": "BLANK"
 	},
+	"private_vulnerability_reporting": true,
 	"rulesets": [
 		{
 			"name": "main: pull requests only",

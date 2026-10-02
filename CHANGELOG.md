@@ -6,6 +6,12 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The README states the minimum Pi version: 0.80.4 or later, tested with 1.0.0.
+- Private vulnerability reporting is enabled, so the advisory form linked from
+  `SECURITY.md` works.
+
 ### Changed
 
 - The package entry is now `src/index.ts`; the sources moved into `src/`.
