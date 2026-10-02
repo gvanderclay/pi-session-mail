@@ -1,7 +1,7 @@
 // The settings in `<agent dir>/session-mail.json`, parsed from its text.
 // Pure: reading the file is the caller's job, so this module imports nothing.
 
-/** The hop limit when `session-mail.json` is missing or broken (spec Q14). */
+/** The hop limit when `session-mail.json` is missing or broken. */
 export const DEFAULT_HOP_LIMIT = 5;
 
 /** Days a closed session's mailbox folder is kept before it is pruned. */

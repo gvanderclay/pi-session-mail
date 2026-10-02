@@ -249,11 +249,15 @@ start, a session removes an address folder when all of these hold:
 - its last activity, the newest change to the folder or its four boxes, is
   older than `pruneAfterDays` days.
 
-Only real folders named like an address are considered; `running/`, symlinks
-and other names are left alone. The work runs after `session_start` returns.
+Removing a folder removes everything in it: the read mail in `cur/` and the
+copies of sent requests in `sent/` go too, not only the empty `new/`. Only real
+folders named like an address are considered; `running/`, symlinks and other
+names are left alone. The work runs after `session_start` returns.
 
 To clean up at once, type `/mailbox prune`. It applies the same rules without
-the age limit and reports `Removed <N> mailbox folders of closed sessions`.
+the age limit, so it removes the folder (with its `cur/` and `sent/`) of every
+closed session with no unread mail, including one that closed a minute ago. It
+reports `Removed <N> mailbox folders of closed sessions`.
 `/mailbox prune <text>` is still a message to a session named `prune`.
 
 ## Configuration

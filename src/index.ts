@@ -27,7 +27,16 @@ import { type FSWatcher, statSync, watch } from "node:fs";
 import { dirname } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { label, listRunning, type RunningRecord, removeRecord, resolveTo, type State, writeRecord } from "./running.ts";
+import {
+	isRunning,
+	label,
+	listRunning,
+	type RunningRecord,
+	removeRecord,
+	resolveTo,
+	type State,
+	writeRecord,
+} from "./running.ts";
 import { type SettleInput, settle } from "./settle.ts";
 import {
 	boxPath,
@@ -47,8 +56,8 @@ import { readSettings, registerTools, type Tools } from "./tools.ts";
 
 const CUSTOM_TYPE = "mailbox";
 const STATUS_KEY = "mailbox";
-/** Fallback rescan interval; `fs.watch` on macOS drops and coalesces events. */
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** Fallback rescan interval; `fs.watch` on macOS drops and coalesces events. */
 const POLL_MS = 1000;
 /** Inbound bodies are cut at this many UTF-8 bytes. */
 const BODY_CAP = 32 * 1024;
@@ -403,17 +412,11 @@ export default function mailbox(pi: ExtensionAPI) {
 		warn(message);
 	}
 
-	/** Whether a live session has an address, from one listing of the running records. */
-	function runningCheck(): (address: string) => boolean {
-		const live = new Set(listRunning().map((record) => record.address));
-		return (address) => live.has(address);
-	}
-
 	/** Remove closed sessions' folders that are older than `pruneAfterDays`; a failure warns and never throws. */
 	function pruneOld(me: string) {
 		try {
 			const { pruneAfterDays } = readSettings(configProblem);
-			pruneClosed({ own: me, isRunning: runningCheck(), cutoffMs: Date.now() - pruneAfterDays * DAY_MS });
+			pruneClosed({ own: me, isRunning, cutoffMs: Date.now() - pruneAfterDays * DAY_MS });
 		} catch (err) {
 			warn(`could not prune old mailbox folders: ${(err as Error).message}`);
 		}
@@ -607,7 +610,7 @@ export default function mailbox(pi: ExtensionAPI) {
 			}
 			if (trimmed === "prune") {
 				try {
-					const removed = pruneClosed({ own: me, isRunning: runningCheck() });
+					const removed = pruneClosed({ own: me, isRunning });
 					context.ui.notify(`Removed ${removed} mailbox folders of closed sessions`, "info");
 				} catch (err) {
 					context.ui.notify(`mailbox: ${(err as Error).message}`, "error");

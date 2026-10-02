@@ -1,7 +1,9 @@
 // `mailbox` gives each Pi session an address (its session id) and an inbox on
 // disk. These tests drive the extension only through its registration
 // function, with a fake `pi` and `ctx`, and observe files, injected messages,
-// `pi.events` traffic, statuses and notifications.
+// `pi.events` traffic, statuses and notifications. The prune race and
+// crash-leftover tests call `pruneClosed` directly, because those windows cannot
+// be reached through the registration function.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -1337,6 +1339,15 @@ function folder(address: string, days: number, unread = false) {
 	return join(stateRoot(), address);
 }
 
+test("only the address folder's own mtime being recent keeps an otherwise old folder", () =>
+	withFreshRoot(() => {
+		const path = folder(newId(), 90);
+		age(path, 1);
+		assert.equal(pruneClosed({ isRunning: () => false, cutoffMs: Date.now() - 30 * DAY_S * 1000 }), 0);
+		assert.ok(existsSync(path));
+		rmSync(path, { recursive: true });
+	}));
+
 test("a session start prunes closed sessions' folders idle for over 30 days and keeps the rest", async () => {
 	const old = folder(newId(), 40);
 	const recent = folder(newId(), 5);
@@ -1451,6 +1462,61 @@ test("pruning puts back mail that reaches new/ between the check and the removal
 			"no folder is left aside",
 		);
 		rmSync(path, { recursive: true });
+	}));
+
+test("pruning keeps a folder whose session becomes live after the first check, with its cur/ and sent/", () =>
+	withFreshRoot(() => {
+		const address = newId();
+		const path = folder(address, 90);
+		writeFileSync(join(box(address, "cur"), "000000000000004-read.json"), "{}");
+		writeFileSync(join(box(address, "sent"), "000000000000005-sent.json"), "{}");
+		let live = false;
+		const removed = pruneClosed({
+			isRunning: () => live,
+			cutoffMs: Date.now(),
+			beforeRemove: () => {
+				live = true; // a running record appearing after the first check
+			},
+		});
+		assert.equal(removed, 0);
+		assert.deepEqual(files(address, "cur"), ["000000000000004-read.json"]);
+		assert.deepEqual(files(address, "sent"), ["000000000000005-sent.json"]);
+		rmSync(path, { recursive: true });
+	}));
+
+test("one folder that fails does not stop the pass", () =>
+	withFreshRoot(() => {
+		const bad = newId();
+		const good = newId();
+		folder(bad, 90);
+		folder(good, 90);
+		const removed = pruneClosed({
+			isRunning: (address) => {
+				if (address === bad) throw new Error("boom");
+				return false;
+			},
+			cutoffMs: Date.now(),
+		});
+		assert.equal(removed, 1);
+		assert.ok(existsSync(join(stateRoot(), bad)));
+		assert.ok(!existsSync(join(stateRoot(), good)));
+		rmSync(join(stateRoot(), bad), { recursive: true });
+	}));
+
+test("a symlinked box in a leftover folder is not listed into the mail boxes", () =>
+	withFreshRoot(() => {
+		const address = newId();
+		const outside = mkdtempSync(join(dir, "outside-"));
+		writeFileSync(join(outside, "secret.json"), "{}");
+		const aside = join(stateRoot(), `.pruning.${address}.${newId()}`);
+		mkdirSync(join(aside, "new"), { recursive: true });
+		writeFileSync(join(aside, "new", "000000000000006-kept.json"), "{}");
+		symlinkSync(outside, join(aside, "cur"));
+		assert.equal(pruneClosed({ isRunning: () => false }), 0);
+		assert.deepEqual(files(address, "new"), ["000000000000006-kept.json"]);
+		assert.deepEqual(files(address, "cur"), []);
+		assert.ok(existsSync(join(outside, "secret.json")));
+		rmSync(join(stateRoot(), address), { recursive: true });
 	}));
 
 test("a folder left aside by a crash is removed when its new/ is empty and restored when it is not", () =>

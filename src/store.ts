@@ -197,8 +197,8 @@ export function readEnvelope(path: string): Envelope {
 /**
  * This session's `sent/` copies of the requests with envelope ids `ids`, keyed
  * by id; an id with no readable copy is absent. `sent/` is listed once, because
- * it is never pruned, grows with the address's age and one reply may name many
- * requests. Only names matching an id are read.
+ * it grows with the address's age (until the folder is pruned, which removes
+ * it too) and one reply may name many requests. Only names matching an id are read.
  */
 export function findSent(address: string, ids: readonly string[]): Map<string, SentCopy> {
 	const wanted = new Set(ids);
@@ -290,6 +290,21 @@ const isDirectory = (path: string): boolean => {
 	}
 };
 
+/** Names in `aside/<box>` when it is a real directory; a symlink or file there lists nothing. Undefined when it cannot be listed. */
+const boxNames = (aside: string, box: Box): string[] | undefined =>
+	isDirectory(join(aside, box)) ? namesIn(join(aside, box)) : [];
+
+/** Rename `from` to `to`; if a concurrent prune renamed the recreated folder away (ENOENT), make the boxes again and retry once. */
+function moveBack(from: string, to: string, address: string): void {
+	try {
+		renameSync(from, to);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+		ensureBoxes(address);
+		renameSync(from, to);
+	}
+}
+
 /** Names in `path`; undefined when it cannot be listed. */
 function namesIn(path: string): string[] | undefined {
 	try {
@@ -318,7 +333,7 @@ function lastActivity(folder: string): number {
  * when the folder was removed.
  */
 function finishAside(aside: string, address: string): boolean {
-	const waiting = namesIn(join(aside, "new"));
+	const waiting = boxNames(aside, "new");
 	if (waiting === undefined) return false;
 	if (waiting.length === 0) {
 		rmSync(aside, { recursive: true, force: true });
@@ -327,8 +342,8 @@ function finishAside(aside: string, address: string): boolean {
 	ensureBoxes(address);
 	// `new/` first, so the mail is back before anything else is.
 	for (const box of ["new", "cur", "sent", "tmp"] as const)
-		for (const name of namesIn(join(aside, box)) ?? [])
-			renameSync(join(aside, box, name), join(boxPath(address, box), name));
+		for (const name of boxNames(aside, box) ?? [])
+			moveBack(join(aside, box, name), join(boxPath(address, box), name), address);
 	rmSync(aside, { recursive: true, force: true });
 	return false;
 }
@@ -337,11 +352,11 @@ function finishAside(aside: string, address: string): boolean {
 export type PruneOptions = {
 	/** This session's address, which is never pruned. */
 	own?: string;
-	/** Whether a live session has this address. */
+	/** Whether a live session has this address; asked again for a candidate just before it is moved aside. */
 	isRunning: (address: string) => boolean;
 	/** Only folders with no activity since this time (ms since the epoch) are removed; none means any age. */
 	cutoffMs?: number;
-	/** Called between a folder's check and its removal; for tests of that window. */
+	/** A test seam, called between a folder's check and its removal, to reach that window. */
 	beforeRemove?: (address: string) => void;
 };
 
@@ -353,12 +368,21 @@ export type PruneOptions = {
  * the check recreates a fresh folder instead of writing into one about to
  * go; mail that reached its `new/` before the rename is moved back and the
  * folder is kept. A folder left aside by a crash is finished the same way.
+ * Liveness is checked again just before the rename, so a session that started
+ * after the first check keeps its folder. An error on one folder skips that
+ * folder, which is then not counted; the pass goes on.
  */
 export function pruneClosed(options: PruneOptions): number {
 	const root = mailRoot();
 	const names = namesIn(root);
 	if (names === undefined) throw new Error(`cannot list ${root}`);
-	return names.filter((name) => pruneOne(root, name, options)).length;
+	return names.filter((name) => {
+		try {
+			return pruneOne(root, name, options);
+		} catch {
+			return false; // one bad folder must not stop the pass
+		}
+	}).length;
 }
 
 /** Prune the entry `name` of the mail root if it is a candidate; true when a folder was removed. */
@@ -376,6 +400,7 @@ function pruneOne(root: string, name: string, options: PruneOptions): boolean {
 	};
 	if (!shouldPrune(facts, options.cutoffMs)) return false;
 	options.beforeRemove?.(name);
+	if (options.isRunning(name)) return false; // a session may have started since the first check
 	const aside = join(root, `.pruning.${name}.${randomUUID()}`);
 	try {
 		renameSync(path, aside);

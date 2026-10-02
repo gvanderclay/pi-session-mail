@@ -12,13 +12,15 @@ follows [Semantic Versioning](https://semver.org/).
   removed when its session is not running, nothing is waiting in its `new/`
   and its last activity (the newest change to the folder or its boxes) is
   older than `pruneAfterDays` days, 30 unless `session-mail.json` sets it. An
-  invalid `pruneAfterDays` means 30, with one warning per session like
-  `hopLimit`. Unread mail, a running session's folder, this session's folder
+  invalid `pruneAfterDays` means 30, with a warning like `hopLimit`'s.
+  Pruning a folder removes its read mail (`cur/`) and its sent copies
+  (`sent/`) as well. Unread mail, a running session's folder, this session's folder
   and `running/` are never removed, nor is anything that is not a real
   folder named like an address. A folder is moved aside before it is removed,
   so mail that arrives at that moment is put back, not lost.
-- `/mailbox prune` removes every such folder at once, whatever its age, and
-  says `Removed <N> mailbox folders of closed sessions`. `/mailbox prune
+- `/mailbox prune` removes every such folder at once, whatever its age, so a
+  closed session with no unread mail loses its folder, `cur/` and `sent/`
+  included, even if it closed a minute ago. It says `Removed <N> mailbox folders of closed sessions`. `/mailbox prune
   <text>` is still a message to a session named `prune`.
 - A running record holds `started`, a token for its process's start time. A
   record whose process id now belongs to a process that started at another
@@ -38,6 +40,12 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Settings warnings (`session-mail.json`) are shown once per distinct problem
+  per session, not once per session: a file with both keys invalid gives two
+  warnings, and a file edited to a different problem warns again. The warning
+  for an unreadable, invalid or non-object file now also names the pruning
+  fallback (30 days). A broken file now warns at session start, not at the
+  first send.
 - **Contract change:** a `message:send` emitted during a run now carries that
   run's hop count instead of 0, so two models delegating to each other through
   an extension no longer escape the hop limit. Emitted while idle it still

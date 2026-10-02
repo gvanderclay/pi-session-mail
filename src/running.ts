@@ -169,6 +169,24 @@ function readRecord(path: string): RunningRecord | undefined {
 	}
 }
 
+/**
+ * Whether `address` has a live running record, read fresh from its one file. The
+ * rules are `listRunning`'s: the pid is alive and, when both tokens are known,
+ * the start token matches. A missing or unreadable record is not running; a
+ * failed probe falls back to the pid alone. Never throws and deletes nothing.
+ */
+export function isRunning(address: string): boolean {
+	try {
+		const record = readRecord(recordPath(address));
+		if (record === undefined || record.address !== address || !alive(record.pid)) return false;
+		if (record.started === undefined) return true;
+		const live = startTokens([record.pid]).get(record.pid);
+		return live === undefined || live === record.started;
+	} catch {
+		return false;
+	}
+}
+
 /** Every running session's record, sorted by label; records of dead processes are deleted. */
 export function listRunning(): RunningRecord[] {
 	let names: string[];
