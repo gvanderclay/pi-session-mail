@@ -63,7 +63,7 @@ follows [Semantic Versioning](https://semver.org/).
 - **Contract change:** an envelope with a `kind` this version does not know
   is read as `message`: it is delivered, wakes the session and expects no
   answer. The original value is not kept. Before, it was set aside with a
-  warning.
+  warning; the test that pinned that now covers only a bad hop count.
 - Envelopes, in `new/` and in `sent/`, are written with mode `0600`; they were
   `0644` under the usual umask.
 - A mail root that already existed with looser permissions is set to `0700` at
