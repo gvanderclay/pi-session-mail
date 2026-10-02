@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { parseProcStat, parsePsStarts } from "../src/running.ts";
+import { parseProcStat, parsePsStarts, startTokens } from "../src/running.ts";
 
 // Fields 3..21 are 19 values, then field 22 (starttime).
 const tail = "S 1 1234 1234 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 12345678";
@@ -21,6 +21,22 @@ test("parseProcStat returns undefined for a line that is too short or malformed"
 	assert.equal(parseProcStat(""), undefined);
 	assert.equal(parseProcStat("4242 (node) S 1 2"), undefined);
 	assert.equal(parseProcStat("no parentheses here"), undefined);
+});
+
+test("a start token does not depend on the reader's TZ", () => {
+	// Sessions started from different shells can have different TZ values, and
+	// a token that differed between them would delete a live session's record.
+	const saved = process.env.TZ;
+	const tokenIn = (tz: string) => {
+		process.env.TZ = tz;
+		return startTokens([process.pid]).get(process.pid);
+	};
+	try {
+		assert.equal(tokenIn("Asia/Tokyo"), tokenIn("America/Chicago"));
+	} finally {
+		if (saved === undefined) delete process.env.TZ;
+		else process.env.TZ = saved;
+	}
 });
 
 test("parsePsStarts maps each pid to its start text and skips junk lines", () => {

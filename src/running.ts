@@ -1,13 +1,13 @@
 // Running-session records and `to` resolution. Internal to `pi-session-mail`: tests
-// reach it only through the extension's registration function (`settle.ts` is the
-// one module tested directly).
+// reach it through the extension's registration function, apart from the start-token
+// probe and its parsers, which `test/start-token.test.ts` tests directly.
 //
 // Each running session announces itself in `<root>/running/<address>.json`:
 // its address, Pi session name, working directory, process id, idle or busy,
 // the address it waits on, and when the record last changed. A record whose
-// process is gone, or whose pid now belongs to a process that started at another
-// time, counts as not running, and the reader that finds it deletes
-// it. The root is the mail root, so every agent directory sees every session.
+// process is gone, or whose pid now belongs to a process that started at
+// another time, counts as not running, and the reader that finds it deletes it.
+// The root is the mail root, so every agent directory sees every session.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -75,10 +75,11 @@ export function parsePsStarts(output: string): Map<number, string> {
 
 /**
  * The start tokens of `pids`, for those the probe could read. Linux reads
- * `/proc`; macOS runs one `ps` for all of them; elsewhere, or on any error,
+ * `/proc`; macOS runs one `ps` for all of them, in UTC and the C locale so
+ * every session renders a start time the same way; elsewhere, or on any error,
  * the result lacks the pid, which callers treat as unknown.
  */
-function startTokens(pids: readonly number[]): Map<number, string> {
+export function startTokens(pids: readonly number[]): Map<number, string> {
 	const out = new Map<number, string>();
 	if (pids.length === 0) return out;
 	if (process.platform === "linux") {
@@ -95,7 +96,7 @@ function startTokens(pids: readonly number[]): Map<number, string> {
 				encoding: "utf8",
 				timeout: 2000,
 				stdio: ["ignore", "pipe", "ignore"],
-				env: { ...process.env, LC_ALL: "C" },
+				env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
 			});
 		} catch (err) {
 			// ps exits 1 when some pid is gone but still prints the others.
