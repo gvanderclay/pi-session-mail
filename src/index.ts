@@ -79,8 +79,9 @@ function quoteRequest(request: SentCopy): string {
 function requestQuotes(me: string, ids: readonly string[]): { requests: SentCopy[]; quotes: string[] } {
 	const requests: SentCopy[] = [];
 	const quotes: string[] = [];
+	const copies = findSent(me, ids);
 	for (const id of ids) {
-		const copy = findSent(me, id);
+		const copy = copies.get(id);
 		if (copy === undefined) {
 			quotes.push(`[mailbox] Your request ${id} has no copy in sent/; only its id is known.`);
 			continue;

@@ -6,7 +6,7 @@
 // is `$XDG_STATE_HOME/pi-session-mail/` (or `~/.local/state/pi-session-mail/`)
 // and is shared by every Pi agent directory on this machine.
 import { randomUUID } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
@@ -32,6 +32,9 @@ type Box = "tmp" | "new" | "cur" | "sent";
 const BOXES: Box[] = ["tmp", "new", "cur", "sent"];
 
 const ADDRESS = /^[A-Za-z0-9_-]+$/;
+
+/** The most requests one reply may name; an envelope over this is not read. */
+const MAX_REPLY_IDS = 50;
 
 /** An address is a single safe path segment: letters, digits, `-` and `_`. */
 export const isAddress = (value: unknown): value is string => typeof value === "string" && ADDRESS.test(value);
@@ -79,7 +82,9 @@ export type SendOptions = { kind: Kind; hops: number; inReplyTo?: string[]; stat
 
 /**
  * Write an envelope to `to`'s inbox: into its `tmp/`, then renamed into its
- * `new/`. A request is also copied into the sender's `sent/`. Synchronous,
+ * `new/`. A request is also copied into the sender's `sent/`, first; if any
+ * step fails the copy is removed again and the send throws, so a thrown send
+ * has delivered nothing. Synchronous,
  * so a `pi.events` caller sees the result as soon as `emit` returns.
  * A reply's `status` is `done` unless given; any other kind's is empty.
  */
@@ -105,34 +110,48 @@ export function send(from: string, to: string, body: string, options: SendOption
 	const text = `${JSON.stringify(envelope, null, 2)}\n`;
 	ensureBoxes(to);
 	const tmp = join(boxPath(to, "tmp"), name);
-	writeFileSync(tmp, text, { mode: 0o600 });
-	renameSync(tmp, join(boxPath(to, "new"), name));
-	if (options.kind !== "reply") {
-		ensureBoxes(from);
-		writeFileSync(join(boxPath(from, "sent"), name), text, { mode: 0o600 });
+	// The sender's copy goes first, so a send that throws has delivered nothing:
+	// a failure after it removes the copy and the `tmp/` file again.
+	let copy: string | undefined;
+	try {
+		if (options.kind !== "reply") {
+			ensureBoxes(from);
+			copy = join(boxPath(from, "sent"), name);
+			writeFileSync(copy, text, { mode: 0o600 });
+		}
+		writeFileSync(tmp, text, { mode: 0o600 });
+		renameSync(tmp, join(boxPath(to, "new"), name));
+	} catch (err) {
+		for (const path of [copy, tmp]) if (path !== undefined) rmSync(path, { force: true });
+		throw err;
 	}
 	return envelope;
 }
 
-/** Regular `.json` files waiting in `new/`, in send order. */
-export function listNew(address: string): string[] {
-	const dir = boxPath(address, "new");
+/** A regular file, the only kind of name worth reading; a FIFO, directory or symlink is not. */
+function isFile(path: string): boolean {
+	try {
+		return lstatSync(path).isFile();
+	} catch {
+		return false;
+	}
+}
+
+/** `.json` names in `box` that are regular files, in readdir order. */
+function jsonFiles(address: string, box: Box): string[] {
+	const dir = boxPath(address, box);
 	let names: string[];
 	try {
 		names = readdirSync(dir);
 	} catch {
 		return [];
 	}
-	return names
-		.filter((name) => name.endsWith(".json"))
-		.filter((name) => {
-			try {
-				return lstatSync(join(dir, name)).isFile();
-			} catch {
-				return false;
-			}
-		})
-		.sort();
+	return names.filter((name) => name.endsWith(".json") && isFile(join(dir, name)));
+}
+
+/** Regular `.json` files waiting in `new/`, in send order. */
+export function listNew(address: string): string[] {
+	return jsonFiles(address, "new").sort();
 }
 
 /** Claim a file by renaming it from `new/` into `cur/`; null when another scanner got it first. */
@@ -163,6 +182,8 @@ export function readEnvelope(path: string): Envelope {
 	if (!isAddress(value.from)) throw new Error(`invalid from address ${JSON.stringify(value.from)}`);
 	if (!Array.isArray(value.in_reply_to) || !value.in_reply_to.every((id) => typeof id === "string"))
 		throw new Error("in_reply_to is not a list of ids");
+	if (value.in_reply_to.length > MAX_REPLY_IDS)
+		throw new Error(`in_reply_to names more than ${MAX_REPLY_IDS} requests`);
 	if (typeof value.body !== "string") throw new Error("missing body");
 	if (value.kind === undefined) value.kind = value.in_reply_to.length > 0 ? "reply" : "request";
 	else if (!KINDS.includes(value.kind)) throw new Error(`invalid kind ${JSON.stringify(value.kind)}`);
@@ -172,40 +193,41 @@ export function readEnvelope(path: string): Envelope {
 }
 
 /**
- * Find this session's `sent/` copy of the request with envelope id `id`;
- * undefined when no readable copy exists. Only names matching the id are read,
- * because `sent/` is never pruned and grows with the address's age.
+ * This session's `sent/` copies of the requests with envelope ids `ids`, keyed
+ * by id; an id with no readable copy is absent. `sent/` is listed once, because
+ * it is never pruned, grows with the address's age and one reply may name many
+ * requests. Only names matching an id are read.
  */
-export function findSent(address: string, id: string): SentCopy | undefined {
+export function findSent(address: string, ids: readonly string[]): Map<string, SentCopy> {
+	const wanted = new Set(ids);
+	const found = new Map<string, SentCopy>();
+	if (wanted.size === 0) return found;
 	const dir = boxPath(address, "sent");
 	let names: string[];
 	try {
-		names = readdirSync(dir).filter((name) => name.endsWith(`-${id}.json`));
+		names = readdirSync(dir);
 	} catch {
-		return undefined;
+		return found;
 	}
 	for (const name of names) {
+		const id = ids.find((candidate) => name.endsWith(`-${candidate}.json`));
+		if (id === undefined || found.has(id)) continue;
 		const path = join(dir, name);
+		if (!isFile(path)) continue;
 		try {
 			const envelope = readEnvelope(path);
-			if (envelope.id === id) return { envelope, path };
+			if (envelope.id === id) found.set(id, { envelope, path });
 		} catch {
 			// an unreadable copy is no copy
 		}
 	}
-	return undefined;
+	return found;
 }
 
 function envelopesIn(address: string, box: Box): Partial<Envelope>[] {
 	const dir = boxPath(address, box);
-	let names: string[];
-	try {
-		names = readdirSync(dir).filter((name) => name.endsWith(".json"));
-	} catch {
-		return [];
-	}
 	const out: Partial<Envelope>[] = [];
-	for (const name of names) {
+	for (const name of jsonFiles(address, box)) {
 		try {
 			out.push(JSON.parse(readFileSync(join(dir, name), "utf8")));
 		} catch {

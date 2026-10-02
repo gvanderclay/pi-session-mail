@@ -25,6 +25,15 @@ follows [Semantic Versioning](https://semver.org/).
   after lint, typecheck and tests pass on Node 22.19 and 24 and a smoke test
   loads the packed package in Pi 1.0.0.
 - The package entry is now `src/index.ts`; the sources moved into `src/`.
+- A send writes the sender's `sent/` copy first and removes it when delivery
+  fails, so a thrown error means nothing was delivered; a failed delivery also
+  no longer leaves a file in the recipient's `tmp/`.
+- A `*.json` name in `cur/` or `sent/` that is not a regular file is skipped
+  instead of read, so a planted FIFO or directory cannot hang a session.
+- An envelope naming more than 50 requests in `in_reply_to` is set aside with a
+  warning.
+- A reply quotes its requests from one listing of `sent/`, not one listing per
+  id.
 
 ## [0.1.0] - 2026-10-02
 

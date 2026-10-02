@@ -4,6 +4,7 @@
 // `pi.events` traffic, statuses and notifications.
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	existsSync,
@@ -970,4 +971,123 @@ test("without a UI there is no status, and delivery still works", async () => {
 	assert.equal(b.sent.length, 1);
 	assert.equal(b.statusCalls(), 0);
 	assert.equal(envelopes(a.id, "new").length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// All-or-nothing sends and planted files
+
+const root0 = process.getuid?.() === 0;
+
+test("a reply quoting several requests still quotes each copy, in order", async () => {
+	const a = session(newId("a"));
+	const b = newId("b");
+	await a.start();
+	for (const body of ["first", "second", "third"]) await a.mailbox(`${b} ${body}`);
+	const ids = envelopes(a.id, "sent").map((e) => e.id);
+	assert.equal(ids.length, 3);
+	writeFileSync(
+		join(box(a.id, "new"), "000000000000001-reply.json"),
+		JSON.stringify({ id: "reply", from: b, to: a.id, in_reply_to: ids, status: "done", ts: "", body: "answer" }),
+	);
+	await until(() => a.sent.length === 1, "A to receive the reply");
+	const content = a.sent[0].message.content;
+	assert.ok(content.includes("first") && content.includes("second") && content.includes("third"), content);
+	assert.ok(content.indexOf("first") < content.indexOf("second"), content);
+	assert.ok(content.indexOf("second") < content.indexOf("third"), content);
+	await a.shutdown();
+});
+
+test("an envelope naming more than 50 requests in in_reply_to is set aside with a warning, and one naming 50 is delivered", async () => {
+	const bId = newId("b");
+	const from = newId("a");
+	mkdirSync(box(bId, "new"), { recursive: true, mode: 0o700 });
+	const write = (name: string, id: string, count: number, body: string) =>
+		writeFileSync(
+			join(box(bId, "new"), name),
+			JSON.stringify({
+				id,
+				from,
+				to: bId,
+				in_reply_to: Array.from({ length: count }, (_, i) => `request-${i}`),
+				status: "",
+				ts: "",
+				body,
+			}),
+		);
+	write("000000000000001-many.json", "many", 51, "oversized");
+	write("000000000000002-cap.json", "cap", 50, "at-the-cap");
+	const b = session(bId);
+	await b.start();
+	await b.shutdown();
+	assert.equal(b.warnings.length, 1);
+	assert.match(b.warnings[0], /in_reply_to/);
+	assert.equal(b.sent.length, 1);
+	assert.ok(b.sent[0].message.content.includes("at-the-cap"));
+	assert.ok(!b.sent[0].message.content.includes("oversized"));
+	assert.equal((b.sent[0].message.content.match(/has no copy in sent\//g) ?? []).length, 50);
+	assert.ok(files(bId, "cur").includes("000000000000001-many.json"));
+});
+
+/**
+ * Run the FIFO or directory scenario (`test/fifo-scenario.ts`) in a child
+ * process. Reading a FIFO blocks forever, so the bounded `spawnSync` timeout,
+ * not the suite, is what a regression hits.
+ */
+function plantedScenario(kind: "cur" | "sent" | "dir") {
+	const run = spawnSync(process.execPath, [join(import.meta.dirname, "fifo-scenario.ts"), kind], {
+		encoding: "utf8",
+		timeout: 20_000,
+		// The child loads Pi, which listens for SIGTERM, so only SIGKILL stops it.
+		killSignal: "SIGKILL",
+	});
+	assert.equal(run.status, 0, `scenario ${kind} failed (${run.signal ?? run.status})\n${run.stdout}${run.stderr}`);
+}
+
+test("a FIFO named *.json in cur/ does not hang delivery or the status count", () => plantedScenario("cur"));
+
+test("a FIFO named *.json in sent/ does not hang a reply's quote", () => plantedScenario("sent"));
+
+test("a directory named *.json in cur/ and sent/ is skipped", () => plantedScenario("dir"));
+
+test("a send whose sender sent/ is read-only throws and leaves nothing in the recipient's new/ or tmp/", {
+	skip: root0,
+}, async () => {
+	const a = session(newId("a"));
+	const b = newId("b");
+	await a.start();
+	const sent = box(a.id, "sent");
+	chmodSync(sent, 0o500);
+	try {
+		const payload: SendPayload = { to: b, body: "never delivered" };
+		a.events.emit("message:send", payload);
+		assert.match(payload.error ?? "", /EACCES/);
+		assert.equal(payload.envelope, undefined);
+		assert.deepEqual(files(b, "new"), []);
+		assert.deepEqual(files(b, "tmp"), []);
+		assert.deepEqual(files(a.id, "sent"), []);
+	} finally {
+		chmodSync(sent, 0o700);
+		await a.shutdown();
+	}
+});
+
+test("a delivery that fails after the sender's sent/ copy is written removes the copy", { skip: root0 }, async () => {
+	const a = session(newId("a"));
+	const b = newId("b");
+	mkdirSync(box(b, "new"), { recursive: true, mode: 0o700 });
+	await a.start();
+	const newBox = box(b, "new");
+	chmodSync(newBox, 0o500);
+	try {
+		const payload: SendPayload = { to: b, body: "never delivered" };
+		a.events.emit("message:send", payload);
+		assert.match(payload.error ?? "", /EACCES/);
+		assert.equal(payload.envelope, undefined);
+		assert.deepEqual(files(b, "new"), []);
+		assert.deepEqual(files(b, "tmp"), []);
+		assert.deepEqual(files(a.id, "sent"), []);
+	} finally {
+		chmodSync(newBox, 0o700);
+		await a.shutdown();
+	}
 });
