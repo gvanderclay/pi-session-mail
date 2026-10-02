@@ -6,6 +6,13 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `/mailbox` refuses with `mailbox: this session has no mailbox address; the
+  mailbox is off` when this session's mailbox is off (an unusable session id,
+  or a mail root it cannot create). Before, it showed the session id as the
+  address, failed a send with a raw error, and still pruned.
+
 ## [0.2.0] - 2026-10-02
 
 ### Added
