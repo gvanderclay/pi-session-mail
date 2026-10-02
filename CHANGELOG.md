@@ -30,10 +30,14 @@ follows [Semantic Versioning](https://semver.org/).
   (written by 0.1.0), and platforms where the start time cannot be read, are
   still judged by process id alone.
 - The README states the minimum Pi version: 0.80.4 or later, tested with 1.0.0.
-  It also says that mail can be lost on a power failure (nothing calls
-  `fsync`), that the mail root must be on a local filesystem, not NFS, that
-  `awaiting` counts requests and asks, and that an envelope naming more than
-  50 requests is set aside.
+- The README says that mail can be lost on a power failure (nothing calls
+  `fsync`), that the mail root must be on a local filesystem, not NFS, and
+  that `awaiting` counts requests and asks.
+- The README has a Compatibility section naming the stable contracts: the
+  hooks and their payloads, the `[mailbox]` lines, the mail root path, the
+  envelope fields, kinds and statuses, the tool and command names, and the
+  `session-mail.json` keys. Changing any of them needs a minor version while
+  the package is at 0.x and a major version from 1.0 on.
 - Private vulnerability reporting is enabled, so the advisory form linked from
   `SECURITY.md` works.
 - A session warns at start when its own address folder grants group or other
@@ -63,7 +67,8 @@ follows [Semantic Versioning](https://semver.org/).
 - Envelopes, in `new/` and in `sent/`, are written with mode `0600`; they were
   `0644` under the usual umask.
 - A mail root that already existed with looser permissions is set to `0700` at
-  session start.
+  session start, when this user can change it; a root this user cannot change
+  is still used as it is.
 - Releases are published by the release workflow, with npm provenance, only
   after lint, typecheck and tests pass on Node 22.19 and 24 and a smoke test
   loads the packed package in Pi 1.0.0.
@@ -77,8 +82,8 @@ follows [Semantic Versioning](https://semver.org/).
   warning.
 - A reply quotes its requests from one listing of `sent/`, not one listing per
   id.
-- The `[mailbox]` label replaces control characters (C0, DEL, C1, and the
-  separators U+2028 and U+2029) with spaces in the envelope id, the ids it
+- The `[mailbox]` label replaces control characters (C0 with tab included,
+  DEL, C1, and the separators U+2028 and U+2029) with spaces in the envelope id, the ids it
   answers, its status, the sender's name and working directory, and the paths
   it names, so a forged value cannot start a line that passes for a
   `[mailbox]` line. The label text is otherwise unchanged.
