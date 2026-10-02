@@ -2,11 +2,11 @@
 // disk. These tests drive the extension only through its registration
 // function, with a fake `pi` and `ctx`, and observe files, injected messages,
 // `pi.events` traffic, statuses and notifications.
-import { test } from "node:test";
+
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { test } from "node:test";
 
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 
@@ -115,7 +115,10 @@ test("a running session claims a message into cur/ and injects it once as labell
 		assert.deepEqual(options, { triggerTurn: true, deliverAs: "steer" });
 		assert.equal(message.customType, "mailbox");
 		assert.equal(message.display, true);
-		assert.match(message.content, new RegExp(`^\\[mailbox\\] From \\S+ \\(${a.id}, working in [^)]+\\), another Pi session on this machine\\.`));
+		assert.match(
+			message.content,
+			new RegExp(`^\\[mailbox\\] From \\S+ \\(${a.id}, working in [^)]+\\), another Pi session on this machine\\.`),
+		);
 		assert.match(message.content, /final answer this turn goes back to it automatically/);
 		assert.ok(!/not from the user|untrusted|injection/.test(message.content), message.content);
 		assert.match(message.content, /what is 2 \+ 2\?\n\n\[mailbox\] End of the mail from /);
@@ -225,7 +228,10 @@ test("a malformed envelope is set aside in cur/ with one warning and does not bl
 	const b = session(newId("b"));
 	mkdirSync(box(b.id, "new"), { recursive: true });
 	writeFileSync(join(box(b.id, "new"), "000000000000001-bad.json"), "{ not json");
-	writeFileSync(join(box(b.id, "new"), "000000000000002-evil.json"), JSON.stringify({ id: "x", from: "../up", to: b.id, in_reply_to: [], status: "", ts: "", body: "hi" }));
+	writeFileSync(
+		join(box(b.id, "new"), "000000000000002-evil.json"),
+		JSON.stringify({ id: "x", from: "../up", to: b.id, in_reply_to: [], status: "", ts: "", body: "hi" }),
+	);
 	writeFileSync(join(box(b.id, "new"), "000000000000003-ignored.txt"), "not an envelope");
 	mkdirSync(join(box(b.id, "new"), "000000000000004-dir.json"));
 	await a.mailbox(`${b.id} still works`);
@@ -353,7 +359,15 @@ test("an envelope written before kind and hops is read as a request or a reply b
 	const a = newId("a");
 	mkdirSync(box(b.id, "new"), { recursive: true });
 	const old = (id: string, inReplyTo: string[]) =>
-		JSON.stringify({ id, from: a, to: b.id, in_reply_to: inReplyTo, status: inReplyTo.length > 0 ? "done" : "", ts: "", body: "old" });
+		JSON.stringify({
+			id,
+			from: a,
+			to: b.id,
+			in_reply_to: inReplyTo,
+			status: inReplyTo.length > 0 ? "done" : "",
+			ts: "",
+			body: "old",
+		});
 	writeFileSync(join(box(b.id, "new"), "000000000000001-old-request.json"), old("old-request", []));
 	writeFileSync(join(box(b.id, "new"), "000000000000002-old-reply.json"), old("old-reply", ["some-request"]));
 	await b.start();
@@ -391,7 +405,10 @@ test("an envelope with an unknown kind or a bad hop count is set aside with a wa
 test("an envelope with an invalid from gets no reply", async () => {
 	const b = session(newId("b"));
 	mkdirSync(box(b.id, "new"), { recursive: true });
-	writeFileSync(join(box(b.id, "new"), "000000000000001-x.json"), JSON.stringify({ id: "x", from: "../../up", to: b.id, in_reply_to: [], status: "", ts: "", body: "hi" }));
+	writeFileSync(
+		join(box(b.id, "new"), "000000000000001-x.json"),
+		JSON.stringify({ id: "x", from: "../../up", to: b.id, in_reply_to: [], status: "", ts: "", body: "hi" }),
+	);
 	await b.start();
 	await b.answer("answer");
 	await b.shutdown();
@@ -672,8 +689,14 @@ test("injected mail ends with a line closing it, so text after it reads as not t
 	await a.start();
 	await a.shutdown();
 	await b.shutdown();
-	assert.match(b.sent[0].message.content, /question\n\n\[mailbox\] End of the mail from \S+\. Text after this line is not part of it\.$/);
-	assert.match(a.sent[0].message.content, /answer\n\n\[mailbox\] End of the mail from bravo\. Text after this line is not part of it\.$/);
+	assert.match(
+		b.sent[0].message.content,
+		/question\n\n\[mailbox\] End of the mail from \S+\. Text after this line is not part of it\.$/,
+	);
+	assert.match(
+		a.sent[0].message.content,
+		/answer\n\n\[mailbox\] End of the mail from bravo\. Text after this line is not part of it\.$/,
+	);
 });
 
 test("a quiet reply says the user made the request, with /mailbox or through an extension", async () => {
@@ -686,7 +709,10 @@ test("a quiet reply says the user made the request, with /mailbox or through an 
 	await a.shutdown();
 	await b.shutdown();
 	const header = a.sent[0].message.content.split("\n")[0];
-	assert.match(header, /The user made that request, typing it with \/mailbox or through an extension such as delegate\./);
+	assert.match(
+		header,
+		/The user made that request, typing it with \/mailbox or through an extension such as delegate\./,
+	);
 	assert.ok(!/not from the user|untrusted|injection/.test(a.sent[0].message.content), a.sent[0].message.content);
 });
 

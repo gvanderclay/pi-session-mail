@@ -1,4 +1,4 @@
-// `mailbox`: a file mailbox between Pi sessions on this machine.
+// pi-session-mail: a file mailbox between Pi sessions on this machine.
 //
 // Every session has an address (its session id) and an inbox under
 // `<mail root>/<address>/`, where the mail root
@@ -26,7 +26,7 @@
 import { type FSWatcher, watch } from "node:fs";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-
+import { label, listRunning, removeRecord, resolveTo, type State, writeRecord } from "./running.ts";
 import {
 	boxPath,
 	claim,
@@ -37,10 +37,9 @@ import {
 	isAddress,
 	listNew,
 	readEnvelope,
-	send,
 	type SentCopy,
+	send,
 } from "./store.ts";
-import { label, listRunning, removeRecord, resolveTo, type State, writeRecord } from "./running.ts";
 import { registerTools, type Tools } from "./tools.ts";
 
 const CUSTOM_TYPE = "mailbox";
@@ -62,7 +61,8 @@ const TOOK_OVER =
 const ERRORED = (error: string) =>
 	`(The run ended on an error before it finished: ${error}. The text that follows, if any, is partial.)`;
 /** Body of a `failed` reply to requests that never entered the conversation. */
-const UNSEEN = "(The session was stopped before it read the message. Nothing was done; send it again if it is still needed.)";
+const UNSEEN =
+	"(The session was stopped before it read the message. Nothing was done; send it again if it is still needed.)";
 
 /** Cut `text` to at most `max` UTF-8 bytes on a character boundary; undefined when it already fits. */
 function cap(text: string, max: number): string | undefined {
@@ -148,13 +148,16 @@ function inboundText(
 	if (envelope.kind === "message")
 		header.push(`It expects no answer; if one is wanted, send it with session_mail_send to ${envelope.from}.`);
 	if (envelope.in_reply_to.length > 0)
-		header.push(`It is a reply to your request${envelope.in_reply_to.length > 1 ? "s" : ""} ${envelope.in_reply_to.join(", ")}.`);
+		header.push(
+			`It is a reply to your request${envelope.in_reply_to.length > 1 ? "s" : ""} ${envelope.in_reply_to.join(", ")}.`,
+		);
 	if (byUser)
 		header.push("The user made that request, typing it with /mailbox or through an extension such as delegate.");
 	if (envelope.in_reply_to.length > 0 && envelope.status !== "done")
 		header.push(`Its status is "${envelope.status}", not "done": it is not an answer.`);
 	const cut = cap(envelope.body, BODY_CAP);
-	const body = cut === undefined ? envelope.body : `${cut}\n\n[mailbox] Body cut at 32 KiB; the full envelope is ${path}`;
+	const body =
+		cut === undefined ? envelope.body : `${cut}\n\n[mailbox] Body cut at 32 KiB; the full envelope is ${path}`;
 	return [header.join(" "), ...quotes, body, endLine(sender.name)].join("\n\n");
 }
 
@@ -162,7 +165,7 @@ function inboundText(
  * `pi.events` channels. Both rely on Pi's event bus running a listener's
  * synchronous code before `emit` returns; do all work before any `await`.
  *
- * - `message:send`: the caller emits `{ to, body }`; `mailbox` writes a
+ * - `message:send`: the caller emits `{ to, body }`; `pi-session-mail` writes a
  *   request and sets `envelope` (or `error`) on the same object. Neither set
  *   means no provider is installed.
  * - `message:inbound`: emitted for every claimed envelope, requests and
@@ -208,7 +211,9 @@ function assistantText(message: Message): string | undefined {
 			? content
 			: Array.isArray(content)
 				? content
-						.filter((part): part is { type: "text"; text: string } => part?.type === "text" && typeof part.text === "string")
+						.filter(
+							(part): part is { type: "text"; text: string } => part?.type === "text" && typeof part.text === "string",
+						)
 						.map((part) => part.text)
 						.join("\n")
 				: "";
@@ -328,14 +333,19 @@ export default function mailbox(pi: ExtensionAPI) {
 		// Mail that wakes or steers the session raises its count; a reply shown
 		// quietly starts no turn, but one a listener took over may.
 		if (wakes || inbound.handled) hops = Math.max(hops, envelope.hops + 1);
-		// `mailbox` cannot observe a listener's own message, so a takeover counts as seen.
+		// `pi-session-mail` cannot observe a listener's own message, so a takeover counts as seen.
 		if (inbound.handled) {
 			seen.add(envelope.id);
 			return;
 		}
 		injected++;
 		pi.sendMessage(
-			{ customType: CUSTOM_TYPE, content: inboundText(envelope, path, quotes, { lateAnswer, byUser }), display: true, details: { id: envelope.id } },
+			{
+				customType: CUSTOM_TYPE,
+				content: inboundText(envelope, path, quotes, { lateAnswer, byUser }),
+				display: true,
+				details: { id: envelope.id },
+			},
 			// Mail for the model wakes an idle session and steers into a busy one at
 			// its next gap between tool calls, queued user input or not; a reply only
 			// shows itself, and starts no turn.
@@ -577,7 +587,8 @@ export default function mailbox(pi: ExtensionAPI) {
 			const me = address;
 			if (me === undefined) throw new Error("this session has no mailbox address; nothing was sent");
 			const kind = receivedKinds.get(id);
-			if (kind === undefined) throw new Error(`no mail with id ${JSON.stringify(id)} reached this session; nothing was sent`);
+			if (kind === undefined)
+				throw new Error(`no mail with id ${JSON.stringify(id)} reached this session; nothing was sent`);
 			if (kind !== "ask")
 				throw new Error(
 					`${id} is a ${kind}, not an ask; nothing was sent. ${kind === "request" ? "A request is answered automatically when this run settles." : kind === "message" ? "A message expects no answer; session_mail_send sends one if it is wanted." : "A reply is never answered."}`,

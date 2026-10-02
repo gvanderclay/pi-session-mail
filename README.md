@@ -1,7 +1,7 @@
-# mailbox
+# pi-session-mail
 
-A file mailbox between Pi sessions on the same machine. The npm package is
-`pi-session-mail`.
+A file mailbox between Pi sessions on the same machine, with a `/mailbox`
+command and `session_mail_*` tools.
 
 Every session has an address — its session id — and an inbox under
 `<mail root>/<address>/{tmp,new,cur,sent}/`. The mail root is
@@ -191,7 +191,7 @@ Run them with `pnpm install && pnpm test`.
 
 ## Configuration
 
-`mailbox` names no model. It reads one optional settings file,
+`pi-session-mail` names no model. It reads one optional settings file,
 `<agent dir>/session-mail.json`, where the agent dir is Pi's
 (`PI_CODING_AGENT_DIR`, or `~/.pi/agent`), so each agent directory sets its own:
 
@@ -205,7 +205,7 @@ Run them with `pnpm install && pnpm test`.
 
 The file is read at each send. A missing file, or one without `hopLimit`,
 means 5. An unreadable or invalid file also means 5, with one warning per
-session. `mailbox` sets no environment variable of its own and reads one
+session. `pi-session-mail` sets no environment variable of its own and reads one
 standard one:
 
 | Variable | Effect |
@@ -225,7 +225,7 @@ Requests, asks and messages carry no status.
 
 ## Hooks
 
-`mailbox` provides all three hooks below and consumes none. All are `pi.events`
+`pi-session-mail` provides all three hooks below and consumes none. All are `pi.events`
 channels, and all depend on listeners doing all their work
 **synchronously**: the emitter reads the results off the payload the moment
 `emit` returns, so a listener must finish before its first `await`.
@@ -279,13 +279,13 @@ assert.equal(probe.error, undefined);
 
 ### `message:inbound`
 
-`mailbox` emits this for every claimed envelope before injecting it, requests,
+`pi-session-mail` emits this for every claimed envelope before injecting it, requests,
 messages and replies alike.
 
-`mailbox` never emits it from inside a `session_start` handler. Mail waiting
+`pi-session-mail` never emits it from inside a `session_start` handler. Mail waiting
 when a session starts is claimed on a later event-loop turn (`setImmediate`),
 so a listener that rebuilds its state synchronously in its own `session_start`
-sees that mail, whether it loads before or after `mailbox`. The one exception
+sees that mail, whether it loads before or after `pi-session-mail`. The one exception
 is an extension loaded between the two whose `session_start` waits on I/O:
 the claim can then run before the listener's handler. The watcher and the poll timer deliver later mail as usual.
 
@@ -294,16 +294,16 @@ the claim can then run before the listener's handler. The watcher and the poll t
 | `envelope` | the claimed envelope, with `from`, `kind`, `hops`, `in_reply_to`, `status`, `body` and the rest; an old envelope without `kind` or `hops` gets them filled in as described above |
 | `path` | the envelope's path in this session's `cur/` |
 | `requests` | a reply's `in_reply_to` requests found in this session's `sent/`, each as `{ envelope, path }`; empty for a request, and shorter than `in_reply_to` when a copy is missing |
-| `handled` | set to `true` by a listener that shows the message itself; `mailbox` then injects nothing |
+| `handled` | set to `true` by a listener that shows the message itself; `pi-session-mail` then injects nothing |
 
 A listener that sets `handled` owns the display, and chooses whether its own
 message starts a turn (`triggerTurn`). A request a listener handled still
 arms this session's reply and counts as read, so a takeover never leaves a
-sender without an answer. A reply `mailbox` injects itself quotes each request
+sender without an answer. A reply `pi-session-mail` injects itself quotes each request
 the same way, capped at 2 KiB with the copy's path.
 
 ```js message:inbound
-// Take over replies to requests this extension sent; `mailbox` still shows
+// Take over replies to requests this extension sent; `pi-session-mail` still shows
 // requests and any mail the listener ignores.
 pi.events.on("message:inbound", (payload) => {
   if (payload.handled) return;
@@ -324,7 +324,7 @@ pi.events.on("message:inbound", (payload) => {
 
 ### `message:scan`
 
-A consumer emits `{}` to have `mailbox` claim the mail waiting in its inbox
+A consumer emits `{}` to have `pi-session-mail` claim the mail waiting in its inbox
 now, instead of at the next watcher event or poll. The listener runs the
 inbox scan synchronously, so every waiting envelope has been emitted as
 `message:inbound` (and delivered) by the time `emit` returns, and then sets

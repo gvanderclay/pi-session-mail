@@ -1,4 +1,4 @@
-// The model-facing tools of `mailbox`. Internal to the package: tests reach
+// The model-facing tools of `pi-session-mail`. Internal to the package: tests reach
 // them only through the extension's registration function.
 //
 // `session_mail_list` reports every running Pi session on this machine, in
@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { label, listRunning, resolveTo, type RunningRecord } from "./running.ts";
+import { label, listRunning, type RunningRecord, resolveTo } from "./running.ts";
 import { type Envelope, send } from "./store.ts";
 
 /** What the tools need from the extension around them. */
@@ -86,14 +86,18 @@ function hopLimit(hooks: ToolHooks): number {
 		text = readFileSync(path, "utf8");
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code !== "ENOENT")
-			hooks.configProblem(`could not read ${path} (${(err as Error).message}); using the hop limit ${DEFAULT_HOP_LIMIT}`);
+			hooks.configProblem(
+				`could not read ${path} (${(err as Error).message}); using the hop limit ${DEFAULT_HOP_LIMIT}`,
+			);
 		return DEFAULT_HOP_LIMIT;
 	}
 	let config: unknown;
 	try {
 		config = JSON.parse(text);
 	} catch (err) {
-		hooks.configProblem(`${path} is not valid JSON (${(err as Error).message}); using the hop limit ${DEFAULT_HOP_LIMIT}`);
+		hooks.configProblem(
+			`${path} is not valid JSON (${(err as Error).message}); using the hop limit ${DEFAULT_HOP_LIMIT}`,
+		);
 		return DEFAULT_HOP_LIMIT;
 	}
 	if (typeof config !== "object" || config === null || Array.isArray(config)) {
@@ -166,8 +170,12 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 		description:
 			"Send a message to another Pi session on this machine. A running recipient that is idle starts a turn on it; a busy one reads it at its next gap between tool calls. The message expects no answer and nothing is sent back automatically; the recipient answers, if at all, with its own session_mail_send. `to` is a running session's name, an id prefix of at least 8 characters, or a full session id; a closed session is reached only by its full id, and the message waits in its inbox until it starts. session_mail_list shows who is running.",
 		parameters: Type.Object({
-			to: Type.String({ description: "The recipient: a running session's name, an id prefix of 8+ characters, or a full session id." }),
-			message: Type.String({ description: "The message text. The recipient sees it labelled as coming from this session." }),
+			to: Type.String({
+				description: "The recipient: a running session's name, an id prefix of 8+ characters, or a full session id.",
+			}),
+			message: Type.String({
+				description: "The message text. The recipient sees it labelled as coming from this session.",
+			}),
 		}),
 		async execute(
 			_toolCallId: string,
@@ -199,8 +207,13 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 		description:
 			"Ask another running Pi session on this machine a question and wait for its answer, which comes back as this tool's result. The answer is the other session's final message when its run settles, or an earlier reply it sends. The wait ends after 10 minutes, when the other session stops running, or when the user stops it; a later answer then arrives as a message. Only one ask waits at a time, and a session that is waiting on this one cannot be asked. `to` is a running session's name, an id prefix of at least 8 characters, or a full session id; session_mail_list shows who is running. For a note that needs no answer, use session_mail_send.",
 		parameters: Type.Object({
-			to: Type.String({ description: "The running session to ask: its name, an id prefix of 8+ characters, or its full session id." }),
-			message: Type.String({ description: "The question. The recipient sees it labelled as coming from this session, with this session waiting." }),
+			to: Type.String({
+				description: "The running session to ask: its name, an id prefix of 8+ characters, or its full session id.",
+			}),
+			message: Type.String({
+				description:
+					"The question. The recipient sees it labelled as coming from this session, with this session waiting.",
+			}),
 		}),
 		async execute(
 			_toolCallId: string,
@@ -211,7 +224,9 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 		) {
 			const me = ctx.sessionManager.getSessionId();
 			if (waiting !== undefined)
-				throw new Error(`nothing was sent: your ask ${waiting.id} to ${waiting.to} is still waiting, and only one ask waits at a time`);
+				throw new Error(
+					`nothing was sent: your ask ${waiting.id} to ${waiting.to} is still waiting, and only one ask waits at a time`,
+				);
 			const body = typeof params.message === "string" ? params.message.trim() : "";
 			if (body === "") throw new Error("the question is empty; nothing was sent");
 			const to = resolveTo(typeof params.to === "string" ? params.to : "", me);
@@ -280,7 +295,8 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 
 	return {
 		takeAnswer(envelope) {
-			if (waiting === undefined || envelope.kind !== "reply" || !envelope.in_reply_to.includes(waiting.id)) return false;
+			if (waiting === undefined || envelope.kind !== "reply" || !envelope.in_reply_to.includes(waiting.id))
+				return false;
 			waiting.finish({ outcome: "answered", status: envelope.status, body: envelope.body });
 			return true;
 		},
