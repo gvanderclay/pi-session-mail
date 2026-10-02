@@ -15,12 +15,13 @@ inbox: the `/mailbox` command, the `session_mail_*` tools, and the
 ## Checks
 
 - `pnpm check` runs lint (`biome ci .`), typecheck (`tsc -p .`) and the
-  tests. Run it before every commit; CI runs the same on Node 22.19 and 24,
-  with a fresh `HOME` and no `PI_CODING_AGENT_DIR`.
+  tests. Run it before every commit; CI runs the same on Node 22.19 and 24 on
+  Linux and on Node 24 on macOS, with a fresh `HOME` and no
+  `PI_CODING_AGENT_DIR`.
 - `node scripts/smoke.mjs` loads the packed package in the `pi` on `PATH` and
   sends one `/mailbox` message, with no API key or model and temporary `HOME`,
-  agent and state folders. CI runs it on Pi 1.0.0 (required) and the latest Pi.
-  Run it after changing `package.json` `pi` or `files`.
+  agent and state folders. CI runs it on Pi 1.0.0 (required) and the latest Pi
+  (reporting only). Run it after changing `package.json` `pi` or `files`.
 - A single file: `node --test test/hooks.test.ts`.
 - `node scripts/check-pack.mjs` after changing `package.json` `files` or adding
   a source file. `files` lists `src`, so every `.ts` file in `src/` is published.
@@ -32,8 +33,9 @@ inbox: the `/mailbox` command, the `session_mail_*` tools, and the
 
 - Never commit to `main`: a ruleset refuses pushes there. Work on a branch,
   open a pull request with `gh pr create`, and merge with
-  `gh pr merge --squash --auto`; it merges once the `check` and `pack` jobs
-  pass. The pull request title becomes the commit message.
+  `gh pr merge --squash --auto`; it merges once the required checks in
+  `.github/repo-settings.json` pass (`check`, `macos`, `smoke (1.0.0)` and
+  `pack`). The pull request title becomes the commit message.
 - Repository settings and rulesets live in `.github/repo-settings.json`.
   Change them there, in a pull request, then apply them with
   `node scripts/repo-settings.mjs` (`--dry-run` first); never in GitHub's UI.

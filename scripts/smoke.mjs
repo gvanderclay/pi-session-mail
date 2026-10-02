@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const RECIPIENT = "0b2f6c1e-5d3a-4f7e-9a41-7c8d2e6b1a90";
+/** How long the RPC run, and each command before it, may take. */
 const TIMEOUT_MS = 60_000;
 
 const root = mkdtempSync(join(tmpdir(), "pi-session-mail-smoke-"));
@@ -43,7 +44,13 @@ function fail(reason) {
 
 function run(command, args, options = {}) {
 	try {
-		return execFileSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...options });
+		return execFileSync(command, args, {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+			timeout: TIMEOUT_MS,
+			killSignal: "SIGKILL",
+			...options,
+		});
 	} catch (error) {
 		const output = `${error.stdout ?? ""}${error.stderr ?? ""}`.trim();
 		return fail(`\`${command} ${args.join(" ")}\` failed: ${output || error.message}`);
@@ -62,20 +69,34 @@ const child = spawn("pi", ["--mode", "rpc", "--no-session"], { env, cwd: root, s
 const records = [];
 let stderr = "";
 let buffered = "";
+let closed = false;
+function parse(line) {
+	try {
+		records.push(JSON.parse(line));
+	} catch {
+		// not a record
+	}
+}
+child.on("error", (error) => fail(`could not run pi: ${error.message}`));
+child.stdin.on("error", () => {
+	// Pi exited before reading the prompt; its output says why.
+});
+child.stderr.setEncoding("utf8");
 child.stderr.on("data", (chunk) => {
 	stderr += chunk;
 });
+child.stdout.setEncoding("utf8");
 child.stdout.on("data", (chunk) => {
 	buffered += chunk;
 	const lines = buffered.split("\n");
 	buffered = lines.pop();
-	for (const line of lines) {
-		try {
-			records.push(JSON.parse(line));
-		} catch {
-			// not a record
-		}
-	}
+	for (const line of lines) parse(line);
+});
+// "close" comes after stdout is drained, unlike "exit"; a last line may lack its newline.
+child.on("close", () => {
+	if (buffered) parse(buffered);
+	buffered = "";
+	closed = true;
 });
 
 const prompt = { id: "smoke-1", type: "prompt", message: `/mailbox ${RECIPIENT} smoke test` };
@@ -85,10 +106,13 @@ const deadline = Date.now() + TIMEOUT_MS;
 const response = () => records.find((record) => record.type === "response" && record.id === prompt.id);
 const sent = () =>
 	records.find((record) => record.type === "extension_ui_request" && /^Sent /.test(record.message ?? ""));
-while (!(response() && sent()) && child.exitCode === null && Date.now() < deadline) {
+while (!(response() && sent()) && !closed && Date.now() < deadline) {
 	await new Promise((resolve) => setTimeout(resolve, 100));
 }
-child.kill();
+if (!closed) {
+	child.kill("SIGKILL");
+	await new Promise((resolve) => child.once("close", resolve));
+}
 
 if (!response()) fail(`no response to the prompt (pi stderr: ${stderr.trim() || "empty"})`);
 if (!response().success) fail(`the prompt was rejected, so Pi did not run /mailbox as a command; the extension probably did not load: ${JSON.stringify(response())}`);
