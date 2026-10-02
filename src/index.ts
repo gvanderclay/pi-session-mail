@@ -26,7 +26,7 @@
 import { type FSWatcher, watch } from "node:fs";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { label, listRunning, removeRecord, resolveTo, type State, writeRecord } from "./running.ts";
+import { label, listRunning, type RunningRecord, removeRecord, resolveTo, type State, writeRecord } from "./running.ts";
 import { type SettleInput, settle } from "./settle.ts";
 import {
 	boxPath,
@@ -53,11 +53,9 @@ const BODY_CAP = 32 * 1024;
 const QUOTE_CAP = 2 * 1024;
 /** Cut `text` to at most `max` UTF-8 bytes on a character boundary; undefined when it already fits. */
 function cap(text: string, max: number): string | undefined {
-	const bytes = Buffer.from(text, "utf8");
-	if (bytes.length <= max) return undefined;
-	let end = max;
-	while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--; // back off a split character
-	return bytes.subarray(0, end).toString("utf8");
+	// `encodeInto` stops before a character that does not fit, so the cut is on a boundary.
+	const { read } = new TextEncoder().encodeInto(text, new Uint8Array(max));
+	return read === text.length ? undefined : text.slice(0, read);
 }
 
 /** A reply quotes each request it answers: the id, the copy's path, then the capped body. */
@@ -98,8 +96,7 @@ function requestQuotes(me: string, ids: readonly string[]): { requests: SentCopy
  * directory. No distrust wording: with it, models refused every peer request
  * as a possible injection (spec Q37). Safety lives outside the model.
  */
-function senderLine(address: string): { line: string; name: string } {
-	const record = listRunning().find((r) => r.address === address);
+function senderLine(address: string, record: RunningRecord | undefined): { line: string; name: string } {
 	const where = record === undefined ? "" : `, working in ${record.cwd}`;
 	const name = label(record ?? { address });
 	return { line: `[mailbox] From ${name} (${address}${where}), another Pi session on this machine.`, name };
@@ -124,7 +121,10 @@ function inboundText(
 	opts: { lateAnswer: boolean; byUser: boolean },
 ): string {
 	const { lateAnswer, byUser } = opts;
-	const sender = senderLine(envelope.from);
+	const sender = senderLine(
+		envelope.from,
+		listRunning().find((r) => r.address === envelope.from),
+	);
 	const header = [sender.line];
 	if (envelope.kind === "request") header.push("Your final answer this turn goes back to it automatically.");
 	if (envelope.kind === "ask")
@@ -172,22 +172,15 @@ type Message = { role?: string; content?: unknown; stopReason?: unknown; errorMe
 
 /** The last assistant message in a run's transcript, if any. */
 function lastAssistant(messages: readonly unknown[]): Message | undefined {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const message = messages[i] as Message;
-		if (message?.role === "assistant") return message;
-	}
-	return undefined;
+	return (messages as Message[]).findLast((message) => message?.role === "assistant");
 }
 
 /** The text of the last assistant message that has any; undefined when none has. */
 function lastAssistantText(messages: readonly unknown[]): string | undefined {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const message = messages[i] as Message;
-		if (message?.role !== "assistant") continue;
-		const text = assistantText(message);
-		if (text !== undefined) return text;
-	}
-	return undefined;
+	const message = (messages as Message[]).findLast(
+		(candidate) => candidate?.role === "assistant" && assistantText(candidate) !== undefined,
+	);
+	return message === undefined ? undefined : assistantText(message);
 }
 
 /** The text of an assistant message; undefined when it has none. */
@@ -214,12 +207,8 @@ export default function mailbox(pi: ExtensionAPI) {
 	let timer: ReturnType<typeof setInterval> | undefined;
 	/** Envelope ids already handed to Pi in this process. */
 	const delivered = new Set<string>();
-	/** The kind of each envelope this session has claimed, by id, so a reply can say why it is refused. */
-	const receivedKinds = new Map<string, Envelope["kind"]>();
 	/** Request ids awaiting this session's reply, keyed by sender. In memory only. */
 	let owed = new Map<string, string[]>();
-	/** Ask ids awaiting this session's answer, keyed by sender; answered apart from requests. */
-	let owedAsks = new Map<string, string[]>();
 	/** Owed request ids whose message entered the conversation (or a listener took over). */
 	let seen = new Set<string>();
 	/**
@@ -302,7 +291,7 @@ export default function mailbox(pi: ExtensionAPI) {
 
 	function deliver(me: string, envelope: Envelope, path: string) {
 		delivered.add(envelope.id);
-		receivedKinds.set(envelope.id, envelope.kind);
+		tools?.received(envelope);
 		// The answer to a waiting ask is that tool call's result, and nothing else.
 		if (tools?.takeAnswer(envelope)) return;
 		const { requests, quotes } = requestQuotes(me, envelope.in_reply_to);
@@ -316,7 +305,6 @@ export default function mailbox(pi: ExtensionAPI) {
 		// Only requests arm an answer: replies are never answered, and messages
 		// expect none. A request arms one even when a listener took over its display.
 		if (envelope.kind === "request") owed.set(envelope.from, [...(owed.get(envelope.from) ?? []), envelope.id]);
-		if (envelope.kind === "ask") owedAsks.set(envelope.from, [...(owedAsks.get(envelope.from) ?? []), envelope.id]);
 		// Mail that wakes or steers the session raises its count; a reply shown
 		// quietly starts no turn, but one a listener took over may.
 		if (wakes || inbound.handled) hops = Math.max(hops, envelope.hops + 1);
@@ -390,7 +378,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		stop();
 		ctx = context;
 		owed = new Map();
-		owedAsks = new Map();
+		tools?.takeOwedAsks();
 		seen = new Set();
 		held = new Set();
 		lastAnswer = undefined;
@@ -494,10 +482,16 @@ export default function mailbox(pi: ExtensionAPI) {
 			: lastError !== undefined
 				? { kind: "failed", error: lastError }
 				: { kind: "done" };
-		const decision = settle({ requests: owed, asks: owedAsks, seen, held, end, answer: lastAnswer });
+		const decision = settle({
+			requests: owed,
+			asks: tools?.takeOwedAsks() ?? new Map(),
+			seen,
+			held,
+			end,
+			answer: lastAnswer,
+		});
 		owed = decision.owed;
 		held = decision.held;
-		owedAsks = new Map();
 		seen = new Set();
 		lastAnswer = undefined;
 		lastAborted = false;
@@ -536,26 +530,6 @@ export default function mailbox(pi: ExtensionAPI) {
 		waitingOn: (to) => {
 			waitingOn = to;
 			announce();
-		},
-		reply: (id, body) => {
-			const me = address;
-			if (me === undefined) throw new Error("this session has no mailbox address; nothing was sent");
-			const kind = receivedKinds.get(id);
-			if (kind === undefined)
-				throw new Error(`no mail with id ${JSON.stringify(id)} reached this session; nothing was sent`);
-			if (kind !== "ask")
-				throw new Error(
-					`${id} is a ${kind}, not an ask; nothing was sent. ${kind === "request" ? "A request is answered automatically when this run settles." : kind === "message" ? "A message expects no answer; session_mail_send sends one if it is wanted." : "A reply is never answered."}`,
-				);
-			const from = [...owedAsks].find(([, ids]) => ids.includes(id))?.[0];
-			// An answered ask, by this tool or at settle, is no longer owed.
-			if (from === undefined) throw new Error(`ask ${id} is already answered; nothing was sent`);
-			// Answers carry the turn's count and are never refused by the hop limit.
-			const answer = send(me, from, body, { kind: "reply", hops, inReplyTo: [id], status: "done" });
-			const rest = (owedAsks.get(from) ?? []).filter((owedId) => owedId !== id);
-			if (rest.length > 0) owedAsks.set(from, rest);
-			else owedAsks.delete(from);
-			return answer;
 		},
 		hops: () => hops,
 		configProblem: (message) => {

@@ -1,5 +1,6 @@
 // Running-session records and `to` resolution. Internal to `pi-session-mail`: tests
-// reach it only through the extension's registration function.
+// reach it only through the extension's registration function (`settle.ts` is the
+// one module tested directly).
 //
 // Each running session announces itself in `<root>/running/<address>.json`:
 // its address, Pi session name, working directory, process id, idle or busy,
@@ -27,12 +28,14 @@ export type RunningRecord = {
 };
 
 /** How many leading characters of a session id name it in lists and errors. */
-export const SHORT_ID = 8;
+const SHORT_ID = 8;
 
-export const shortId = (address: string) => address.slice(0, SHORT_ID);
+const shortId = (address: string) => address.slice(0, SHORT_ID);
 
 /** A record's display label: its session name, or its short id when it has none. */
-export const label = (record: Pick<RunningRecord, "address" | "name">) => record.name ?? shortId(record.address);
+export function label(record: Pick<RunningRecord, "address" | "name">): string {
+	return record.name ?? shortId(record.address);
+}
 
 const runningDir = () => join(mailRoot(), "running");
 
