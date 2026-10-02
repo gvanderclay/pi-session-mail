@@ -4,7 +4,7 @@
 // `pi.events` traffic, statuses and notifications.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -54,6 +54,48 @@ test("mail lands under $XDG_STATE_HOME/pi-session-mail/<address>/, a root create
 	assert.equal(statSync(root).mode & 0o777, 0o700);
 	for (const sub of ["tmp", "new", "cur", "sent"]) assert.equal(statSync(box(b, sub as "new")).mode & 0o777, 0o700);
 	assert.ok(!existsSync(join(dir, "agent", "mailbox")));
+});
+
+test("a delivered envelope and its sent/ copy are owner-only (0600) even under umask 0022", async () => {
+	const a = session(newId("a"));
+	const b = newId("b");
+	const saved = process.umask(0o022);
+	try {
+		await a.mailbox(`${b} private`);
+	} finally {
+		process.umask(saved);
+	}
+	assert.equal(statSync(join(box(b, "new"), files(b, "new")[0])).mode & 0o777, 0o600);
+	assert.equal(statSync(join(box(a.id, "sent"), files(a.id, "sent")[0])).mode & 0o777, 0o600);
+});
+
+test("a mail root that already exists at 0755 is tightened to 0700 at session start", async () => {
+	const saved = process.env.XDG_STATE_HOME;
+	try {
+		process.env.XDG_STATE_HOME = join(dir, "loose-state");
+		mkdirSync(stateRoot(), { recursive: true });
+		chmodSync(stateRoot(), 0o755);
+		assert.equal(statSync(stateRoot()).mode & 0o777, 0o755);
+		await session(newId("a")).start();
+		assert.equal(statSync(stateRoot()).mode & 0o777, 0o700);
+	} finally {
+		process.env.XDG_STATE_HOME = saved;
+	}
+});
+
+test("a session whose address folder grants group or other access warns once, naming the folder and the fix, and leaves it alone", async () => {
+	const a = session(newId("a"));
+	const folder = join(stateRoot(), a.id);
+	mkdirSync(folder, { recursive: true });
+	chmodSync(folder, 0o750);
+	await a.start();
+	assert.equal(a.warnings.length, 1);
+	assert.ok(a.warnings[0].includes(folder));
+	assert.ok(a.warnings[0].includes(`chmod 700 ${folder}`));
+	assert.equal(statSync(folder).mode & 0o777, 0o750);
+	const tight = session(newId("t"));
+	await tight.start();
+	assert.deepEqual(tight.warnings, []);
 });
 
 test("the root is read at call time and ignores a relative XDG_STATE_HOME", async () => {
@@ -226,7 +268,7 @@ test("the same envelope id is never injected twice", async () => {
 test("a malformed envelope is set aside in cur/ with one warning and does not block later mail", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	mkdirSync(box(b.id, "new"), { recursive: true });
+	mkdirSync(box(b.id, "new"), { recursive: true, mode: 0o700 });
 	writeFileSync(join(box(b.id, "new"), "000000000000001-bad.json"), "{ not json");
 	writeFileSync(
 		join(box(b.id, "new"), "000000000000002-evil.json"),
@@ -357,7 +399,7 @@ test("an envelope written before kind and hops is read as a request or a reply b
 	const seen: Inbound[] = [];
 	b.events.on("message:inbound", (p) => void seen.push(p as Inbound));
 	const a = newId("a");
-	mkdirSync(box(b.id, "new"), { recursive: true });
+	mkdirSync(box(b.id, "new"), { recursive: true, mode: 0o700 });
 	const old = (id: string, inReplyTo: string[]) =>
 		JSON.stringify({
 			id,
@@ -389,7 +431,7 @@ test("an envelope written before kind and hops is read as a request or a reply b
 test("an envelope with an unknown kind or a bad hop count is set aside with a warning", async () => {
 	const b = session(newId("b"));
 	const a = newId("a");
-	mkdirSync(box(b.id, "new"), { recursive: true });
+	mkdirSync(box(b.id, "new"), { recursive: true, mode: 0o700 });
 	const bad = (id: string, extra: object) =>
 		JSON.stringify({ id, from: a, to: b.id, in_reply_to: [], status: "", ts: "", body: "x", ...extra });
 	writeFileSync(join(box(b.id, "new"), "000000000000001-k.json"), bad("k", { kind: "shout", hops: 0 }));
@@ -404,7 +446,7 @@ test("an envelope with an unknown kind or a bad hop count is set aside with a wa
 
 test("an envelope with an invalid from gets no reply", async () => {
 	const b = session(newId("b"));
-	mkdirSync(box(b.id, "new"), { recursive: true });
+	mkdirSync(box(b.id, "new"), { recursive: true, mode: 0o700 });
 	writeFileSync(
 		join(box(b.id, "new"), "000000000000001-x.json"),
 		JSON.stringify({ id: "x", from: "../../up", to: b.id, in_reply_to: [], status: "", ts: "", body: "hi" }),
@@ -648,7 +690,7 @@ test("a request over 2 KiB is quoted cut on a character boundary, naming its cop
 
 test("a reply to a request with no sent/ copy names the id and still delivers", async () => {
 	const b = session(newId("b"));
-	mkdirSync(box(b.id, "new"), { recursive: true });
+	mkdirSync(box(b.id, "new"), { recursive: true, mode: 0o700 });
 	const reply = {
 		id: "22222222-2222-4222-8222-222222222222",
 		from: "someone",

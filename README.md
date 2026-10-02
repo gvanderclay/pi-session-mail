@@ -55,10 +55,14 @@ The footer shows `✉ N pending · N read · N awaiting`, non-zero counts only.
 Every session has an address, its session id, and an inbox under
 `<mail root>/<address>/{tmp,new,cur,sent}/`. The mail root is
 `$XDG_STATE_HOME/pi-session-mail/`, or `~/.local/state/pi-session-mail/` when
-`XDG_STATE_HOME` is unset or not an absolute path. It is created owner-only
-(mode `0700`) and shared by every Pi agent directory on the machine, so
-sessions in different agent directories reach each other. It is safe to delete
-while no session is running.
+`XDG_STATE_HOME` is unset or not an absolute path. Mail files are mode `0600`
+and folders `0700`, and a session sets the root to `0700` even if it already
+existed, so other users cannot read or write mail, while any process running
+as you can. A session warns at start if its own address folder is open to
+other users; it does not change the folder, so run the `chmod 700` it names.
+The root is shared by every Pi agent directory on the machine, so sessions in
+different agent directories reach each other. It is safe to delete while no
+session is running.
 
 Mail waits on disk until a session with that address starts or resumes. A
 running session claims it into `cur/` and injects it once, with the body cut at

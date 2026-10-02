@@ -392,7 +392,7 @@ test("session_mail_send refuses an empty text, an unknown or ambiguous to, and t
 let planted = 0;
 /** An envelope written by hand into `to`'s new/, as a session at hop count `hops` would send it. */
 function plant(to: string, from: string, hops: number, kind = "message") {
-	mkdirSync(join(stateRoot(), to, "new"), { recursive: true });
+	mkdirSync(join(stateRoot(), to, "new"), { recursive: true, mode: 0o700 });
 	const id = `planted-${++planted}`;
 	const name = `${String(planted).padStart(15, "0")}-${id}.json`;
 	writeFileSync(

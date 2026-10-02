@@ -11,8 +11,16 @@ follows [Semantic Versioning](https://semver.org/).
 - The README states the minimum Pi version: 0.80.4 or later, tested with 1.0.0.
 - Private vulnerability reporting is enabled, so the advisory form linked from
   `SECURITY.md` works.
+- A session warns at start when its own address folder grants group or other
+  permission, naming the folder and the `chmod 700` that fixes it. The folder
+  is not changed.
 
 ### Changed
+
+- Envelopes, in `new/` and in `sent/`, are written with mode `0600`; they were
+  `0644` under the usual umask.
+- A mail root that already existed with looser permissions is set to `0700` at
+  session start.
 
 - Releases are published by the release workflow, with npm provenance, only
   after lint, typecheck and tests pass on Node 22.19 and 24 and a smoke test

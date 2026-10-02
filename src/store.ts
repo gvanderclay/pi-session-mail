@@ -6,7 +6,7 @@
 // is `$XDG_STATE_HOME/pi-session-mail/` (or `~/.local/state/pi-session-mail/`)
 // and is shared by every Pi agent directory on this machine.
 import { randomUUID } from "node:crypto";
-import { lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
@@ -51,9 +51,11 @@ export function boxPath(address: string, box: Box): string {
 	return join(mailRoot(), address, box);
 }
 
-/** Create the root and `address`'s boxes; every directory made here is owner-only. */
+/** Create the root and `address`'s boxes; the root is made or set owner-only, and so is every directory made here. */
 export function ensureBoxes(address: string): void {
 	mkdirSync(mailRoot(), { recursive: true, mode: 0o700 });
+	// mkdirSync leaves a directory that already exists as it was.
+	chmodSync(mailRoot(), 0o700);
 	for (const box of BOXES) mkdirSync(boxPath(address, box), { recursive: true, mode: 0o700 });
 }
 
@@ -98,11 +100,11 @@ export function send(from: string, to: string, body: string, options: SendOption
 	const text = `${JSON.stringify(envelope, null, 2)}\n`;
 	ensureBoxes(to);
 	const tmp = join(boxPath(to, "tmp"), name);
-	writeFileSync(tmp, text);
+	writeFileSync(tmp, text, { mode: 0o600 });
 	renameSync(tmp, join(boxPath(to, "new"), name));
 	if (options.kind !== "reply") {
 		ensureBoxes(from);
-		writeFileSync(join(boxPath(from, "sent"), name), text);
+		writeFileSync(join(boxPath(from, "sent"), name), text, { mode: 0o600 });
 	}
 	return envelope;
 }

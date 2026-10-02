@@ -23,7 +23,8 @@
 // `pi.events` (below).
 //
 // The hook contracts live in this package's README.
-import { type FSWatcher, watch } from "node:fs";
+import { type FSWatcher, statSync, watch } from "node:fs";
+import { dirname } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { label, listRunning, type RunningRecord, removeRecord, resolveTo, type State, writeRecord } from "./running.ts";
@@ -261,6 +262,19 @@ export default function mailbox(pi: ExtensionAPI) {
 
 	const warn = (message: string) => ctx?.ui.notify(`mailbox: ${message}`, "warning");
 
+	/** The address folder is left as found; tell the user how to tighten it. */
+	function warnIfLoose(me: string) {
+		const folder = dirname(boxPath(me, "new"));
+		let mode: number;
+		try {
+			mode = statSync(folder).mode & 0o777;
+		} catch {
+			return;
+		}
+		if ((mode & 0o077) === 0) return;
+		warn(`${folder} is mode ${mode.toString(8)}, open to other users; run: chmod 700 ${folder}`);
+	}
+
 	/** Footer entry `✉ N pending · N read · N awaiting`, non-zero parts only; hidden when all are zero. */
 	function updateStatus() {
 		if (!ctx?.hasUI || address === undefined) return;
@@ -399,6 +413,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		address = id;
 		tools?.setAddress(id);
 		ensureBoxes(id);
+		warnIfLoose(id);
 		name = context.sessionManager.getSessionName?.() || undefined;
 		cwd = context.cwd;
 		state = context.isIdle?.() === false ? "busy" : "idle";
