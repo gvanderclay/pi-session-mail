@@ -1,12 +1,15 @@
 // The model-facing tools of `pi-session-mail`. Internal to the package: tests reach
-// them only through the extension's registration function.
+// them only through the extension's registration function (`settle.ts` is the
+// one module tested directly).
 //
 // `session_mail_list` reports every running Pi session on this machine, in
 // every agent directory, and marks the calling one. `session_mail_send` leaves a plain
 // message, which wakes or steers its recipient and expects no answer.
 // `session_mail_ask` leaves an ask and waits, one at a time, for the answer,
 // which comes back as its result rather than as a message.
-// `session_mail_reply` answers an ask this session received, mid-run. Mail a
+// `session_mail_reply` answers an ask this session received, mid-run; the asks
+// this session owes, and the kind of every envelope it has received, are kept
+// here for it. Mail a
 // tool sends carries the turn's hop count and is refused once the count
 // reaches `hopLimit` from `<agent dir>/session-mail.json`.
 import { readFileSync } from "node:fs";
@@ -28,12 +31,18 @@ export type ToolHooks = {
 	configProblem: (message: string) => void;
 	/** The address this session's ask now waits on, or "" when it waits on none; written to its running record. */
 	waitingOn: (address: string) => void;
-	/** Answer the open ask `id` this session received with `body` at once; throws, sending nothing, when it cannot. */
-	reply: (id: string, body: string) => Envelope;
 };
 
-/** What the extension needs from the tools: the ask that is waiting. */
+/** What the extension needs from the tools: the ask that is waiting, and the asks owed. */
 export type Tools = {
+	/** Remember the kind of a claimed envelope, so a refused reply can say why; never forgotten. */
+	recordKind: (envelope: Envelope) => void;
+	/** Arm an answer for an ask: its sender is owed one. Any other kind is ignored. */
+	armAsk: (envelope: Envelope) => void;
+	/** The session's mailbox address, or undefined when it has none (before a valid start, after shutdown); owed asks are dropped. */
+	setAddress: (address: string | undefined) => void;
+	/** The ask ids still owed an answer, by sender; they are no longer owed afterwards. */
+	takeOwedAsks: () => Map<string, string[]>;
 	/** Hand a reply to the waiting ask it answers; false when it answers none, so it is delivered as usual. */
 	takeAnswer: (envelope: Envelope) => boolean;
 	/** Stop waiting, as when the session shuts down. */
@@ -71,17 +80,48 @@ function askText(ask: Envelope, target: string, outcome: AskOutcome): string {
 	}
 }
 
+/** Why `session_mail_reply` refuses mail that is not an ask, by the kind of that mail. */
+const NOT_AN_ASK: Record<Exclude<Envelope["kind"], "ask">, string> = {
+	request: "A request is answered automatically when this run settles.",
+	message: "A message expects no answer; session_mail_send sends one if it is wanted.",
+	reply: "A reply is never answered.",
+};
+
 /** The hop limit when `session-mail.json` is missing or broken (spec Q14). */
 const DEFAULT_HOP_LIMIT = 5;
 
+/** What `session-mail.json` says about the hop limit, and the problem to report, if any. */
+type HopConfig = { limit: number; problem?: string };
+
 /**
- * `hopLimit` from `<agent dir>/session-mail.json`, read at each send. A
- * missing file, or one without `hopLimit`, means the default; an unreadable
- * or invalid one means the default and a problem report.
+ * The hop limit in the text of `session-mail.json`; `undefined` text is a
+ * missing file. A file without `hopLimit` means the default; an invalid one
+ * means the default and a problem report.
  */
+function parseHopLimit(text: string | undefined, path: string): HopConfig {
+	const fallback = (problem: string): HopConfig => ({ limit: DEFAULT_HOP_LIMIT, problem });
+	if (text === undefined) return { limit: DEFAULT_HOP_LIMIT };
+	let config: unknown;
+	try {
+		config = JSON.parse(text);
+	} catch (err) {
+		return fallback(`${path} is not valid JSON (${(err as Error).message}); using the hop limit ${DEFAULT_HOP_LIMIT}`);
+	}
+	if (typeof config !== "object" || config === null || Array.isArray(config))
+		return fallback(`${path} is not a JSON object; using the hop limit ${DEFAULT_HOP_LIMIT}`);
+	const limit = (config as { hopLimit?: unknown }).hopLimit;
+	if (limit === undefined) return { limit: DEFAULT_HOP_LIMIT };
+	if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1)
+		return fallback(
+			`hopLimit in ${path} must be a positive integer, not ${JSON.stringify(limit)}; using ${DEFAULT_HOP_LIMIT}`,
+		);
+	return { limit };
+}
+
+/** `hopLimit` from `<agent dir>/session-mail.json`, read at each send; problems go to `hooks`. */
 function hopLimit(hooks: ToolHooks): number {
 	const path = join(getAgentDir(), "session-mail.json");
-	let text: string;
+	let text: string | undefined;
 	try {
 		text = readFileSync(path, "utf8");
 	} catch (err) {
@@ -91,27 +131,8 @@ function hopLimit(hooks: ToolHooks): number {
 			);
 		return DEFAULT_HOP_LIMIT;
 	}
-	let config: unknown;
-	try {
-		config = JSON.parse(text);
-	} catch (err) {
-		hooks.configProblem(
-			`${path} is not valid JSON (${(err as Error).message}); using the hop limit ${DEFAULT_HOP_LIMIT}`,
-		);
-		return DEFAULT_HOP_LIMIT;
-	}
-	if (typeof config !== "object" || config === null || Array.isArray(config)) {
-		hooks.configProblem(`${path} is not a JSON object; using the hop limit ${DEFAULT_HOP_LIMIT}`);
-		return DEFAULT_HOP_LIMIT;
-	}
-	const limit = (config as { hopLimit?: unknown }).hopLimit;
-	if (limit === undefined) return DEFAULT_HOP_LIMIT;
-	if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1) {
-		hooks.configProblem(
-			`hopLimit in ${path} must be a positive integer, not ${JSON.stringify(limit)}; using ${DEFAULT_HOP_LIMIT}`,
-		);
-		return DEFAULT_HOP_LIMIT;
-	}
+	const { limit, problem } = parseHopLimit(text, path);
+	if (problem !== undefined) hooks.configProblem(problem);
 	return limit;
 }
 
@@ -144,6 +165,31 @@ function waitLabel(address: string, byAddress: ReadonlyMap<string, RunningRecord
 export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 	/** The one ask of this session that is waiting for its answer (spec Q20). */
 	let waiting: WaitingAsk | undefined;
+	/** The kind of each envelope this session has claimed, by id, so a reply can say why it is refused. */
+	const receivedKinds = new Map<string, Envelope["kind"]>();
+	/** Ask ids awaiting this session's answer, keyed by sender; answered apart from requests. */
+	let owedAsks = new Map<string, string[]>();
+	/** This session's address as the extension last set it; undefined when it has none. */
+	let address: string | undefined;
+
+	/** Answer the open ask `id` with `body` at once; throws, sending nothing, when it cannot. */
+	function reply(id: string, body: string): Envelope {
+		const me = address;
+		if (me === undefined) throw new Error("this session has no mailbox address; nothing was sent");
+		const kind = receivedKinds.get(id);
+		if (kind === undefined)
+			throw new Error(`no mail with id ${JSON.stringify(id)} reached this session; nothing was sent`);
+		if (kind !== "ask") throw new Error(`${id} is a ${kind}, not an ask; nothing was sent. ${NOT_AN_ASK[kind]}`);
+		const from = [...owedAsks].find(([, ids]) => ids.includes(id))?.[0];
+		// An answered ask, by this tool or at settle, is no longer owed.
+		if (from === undefined) throw new Error(`ask ${id} is already answered; nothing was sent`);
+		// Answers carry the turn's count and are never refused by the hop limit.
+		const answer = send(me, from, body, { kind: "reply", hops: hooks.hops(), inReplyTo: [id], status: "done" });
+		const rest = (owedAsks.get(from) ?? []).filter((owedId) => owedId !== id);
+		if (rest.length > 0) owedAsks.set(from, rest);
+		else owedAsks.delete(from);
+		return answer;
+	}
 
 	pi.registerTool({
 		name: "session_mail_list",
@@ -277,11 +323,17 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 			ask: Type.String({ description: "The ask id, as given in the ask's label." }),
 			message: Type.String({ description: "The answer." }),
 		}),
-		async execute(_toolCallId: string, params: { ask: string; message: string }) {
+		async execute(
+			_toolCallId: string,
+			params: { ask: string; message: string },
+			_signal: unknown,
+			_onUpdate: unknown,
+			_ctx: ExtensionContext,
+		) {
 			const id = typeof params.ask === "string" ? params.ask.trim() : "";
 			const body = typeof params.message === "string" ? params.message.trim() : "";
 			if (body === "") throw new Error("the answer is empty; nothing was sent");
-			const answer = hooks.reply(id, body);
+			const answer = reply(id, body);
 			hooks.sent();
 			const sender = listRunning().find((record) => record.address === answer.to);
 			const who = sender === undefined ? answer.to : `${label(sender)} (${answer.to})`;
@@ -294,6 +346,21 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 	});
 
 	return {
+		recordKind(envelope) {
+			receivedKinds.set(envelope.id, envelope.kind);
+		},
+		armAsk(envelope) {
+			if (envelope.kind === "ask") owedAsks.set(envelope.from, [...(owedAsks.get(envelope.from) ?? []), envelope.id]);
+		},
+		setAddress(next) {
+			address = next;
+			owedAsks = new Map();
+		},
+		takeOwedAsks() {
+			const taken = owedAsks;
+			owedAsks = new Map();
+			return taken;
+		},
 		takeAnswer(envelope) {
 			if (waiting === undefined || envelope.kind !== "reply" || !envelope.in_reply_to.includes(waiting.id))
 				return false;

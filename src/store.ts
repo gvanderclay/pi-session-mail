@@ -1,5 +1,6 @@
 // The mailbox's directories and envelopes on disk. Internal to `pi-session-mail`:
-// tests reach it only through the extension's registration function.
+// tests reach it only through the extension's registration function (`settle.ts` is
+// the one module tested directly).
 //
 // Layout: <root>/<address>/{tmp,new,cur,sent}/<ms>-<id>.json, where the root
 // is `$XDG_STATE_HOME/pi-session-mail/` (or `~/.local/state/pi-session-mail/`)
