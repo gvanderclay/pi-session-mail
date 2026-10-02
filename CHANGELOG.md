@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The package entry is now `src/index.ts`; the sources moved into `src/`.
+
 ## [0.1.0] - 2026-10-02
 
 The first public release. Before this repository the package lived in its

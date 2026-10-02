@@ -14,7 +14,7 @@ import { test } from "node:test";
 
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 
-import register from "../index.ts";
+import register from "../src/index.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "mailbox-hooks-"));
 process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
