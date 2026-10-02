@@ -470,10 +470,10 @@ while the package is at 0.x.
 
 ## More
 
-- [CONTRIBUTING.md](CONTRIBUTING.md) explains how to set up, test and propose a
+- [CONTRIBUTING.md](https://github.com/gvanderclay/pi-session-mail/blob/main/CONTRIBUTING.md) explains how to set up, test and propose a
   change.
 - [CHANGELOG.md](CHANGELOG.md) lists what changed in each release.
-- [SECURITY.md](SECURITY.md) explains how to report a security problem.
+- [SECURITY.md](https://github.com/gvanderclay/pi-session-mail/blob/main/SECURITY.md) explains how to report a security problem.
 
 ## License
 
