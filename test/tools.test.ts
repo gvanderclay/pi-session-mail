@@ -8,6 +8,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, test } from "node:test";
+import type { TSchema } from "typebox";
+import { Value } from "typebox/value";
 
 import { dir, envelopes, files, newId, records, session, stateRoot, turn, until } from "./harness.ts";
 
@@ -124,8 +126,33 @@ test("two sessions sharing a mail root list each other, marking the caller, and 
 			[b.id, true],
 		],
 	);
+	assert.deepEqual(fromB.structuredContent, {
+		sessions: [
+			{ id: a.id, name: "alpha", cwd: "/work/a", state: "idle", self: false },
+			{ id: b.id, name: "bravo", cwd: "/work/b", state: "busy", self: true },
+		],
+	});
 	await a.shutdown();
 	await b.shutdown();
+});
+
+test("every tool declares an output schema, which the harness checks each result against, and all four hints", () => {
+	const a = session(newId());
+	const sends = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+	const expected: Record<string, object> = {
+		session_mail_list: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+		session_mail_send: sends,
+		session_mail_ask: sends,
+		session_mail_reply: { ...sends, idempotentHint: true },
+	};
+	for (const name of a.tools()) {
+		assert.ok(a.tool(name).outputSchema !== undefined, name);
+		assert.deepEqual(a.tool(name).annotations, expected[name], name);
+	}
+	const ask = a.tool("session_mail_ask").outputSchema as TSchema;
+	assert.ok(Value.Check(ask, { id: "x", to: "y", outcome: "timed-out" }));
+	assert.ok(!Value.Check(ask, { id: "x", to: "y", outcome: "answered" }), "an answer carries status and body");
+	assert.ok(!Value.Check(ask, { id: "x", to: "y", outcome: "gone" }));
 });
 
 test("the list shows whom a session waits on", async () => {
@@ -133,7 +160,16 @@ test("the list shows whom a session waits on", async () => {
 	await a.start();
 	const waiter = newId();
 	plantRecord(waiter, { pid: process.pid, name: "waiter", waitingOn: a.id });
-	const text = (await a.toolCall("session_mail_list")).content[0].text;
+	const result = await a.toolCall("session_mail_list");
+	const text = result.content[0].text;
+	assert.deepEqual((result.structuredContent as { sessions: { id: string }[] }).sessions[1], {
+		id: waiter,
+		name: "waiter",
+		cwd: "/elsewhere",
+		state: "idle",
+		waitingOn: a.id,
+		self: false,
+	});
 	assert.ok(
 		text.includes(`- waiter\n  id: ${waiter}\n  cwd: /elsewhere\n  state: idle, waiting on alpha (${a.id})`),
 		text,
@@ -180,6 +216,7 @@ test("with no records the list says no session is running", async () => {
 	const a = session(newId());
 	const result = await a.toolCall("session_mail_list");
 	assert.equal(result.content[0].text, "No Pi sessions are running with a mailbox.");
+	assert.deepEqual(result.structuredContent, { sessions: [] });
 });
 
 // ---------------------------------------------------------------------------
@@ -328,6 +365,7 @@ test("a message to an idle session starts a turn by steering, labelled with the 
 		`Sent message ${message.id} to bravo (${b.id}). It expects no answer; any answer arrives as a message.`,
 	);
 	assert.deepEqual(result.details, { id: message.id, to: b.id, running: true });
+	assert.deepEqual(result.structuredContent, result.details);
 
 	await until(() => b.sent.length === 1, "the message to be injected");
 	assert.deepEqual(b.sent[0].options, { triggerTurn: true, deliverAs: "steer" });
@@ -391,6 +429,7 @@ test("a message to a closed session's full id waits in its new/, and the result 
 		new RegExp(`left for ${closed}, which is not running: it waits in that session's inbox`),
 	);
 	assert.equal((result.details as { running: boolean }).running, false);
+	assert.deepEqual(result.structuredContent, result.details);
 	await a.shutdown();
 });
 
@@ -670,6 +709,7 @@ test("an ask is answered at the target's settle, and the answer is the tool resu
 	await b.answer("42");
 	const result = await asked;
 	assert.deepEqual(result.details, { id: ask.id, to: b.id, outcome: "answered", status: "done", body: "42" });
+	assert.deepEqual(result.structuredContent, result.details);
 	assert.equal(result.content[0].text, `bravo (${b.id}) answered your ask ${ask.id}:\n\n42`);
 	assert.equal(a.sent.length, 0, "the answer is neither injected nor shown");
 	await a.shutdown();
@@ -694,6 +734,7 @@ test("a stopped answer comes back labelled as not an answer", async () => {
 	const details = result.details as AskDetails;
 	assert.equal(details.outcome, "answered");
 	assert.equal(details.status, "stopped");
+	assert.deepEqual(result.structuredContent, result.details);
 	assert.match(result.content[0].text, /status "stopped", not "done": this is not an answer to your ask/);
 	assert.match(result.content[0].text, /half done$/);
 	await a.shutdown();
@@ -713,6 +754,7 @@ test("an ask gives up after 10 minutes, and a later answer arrives as a message 
 	const result = await asked;
 	t.mock.timers.reset();
 	assert.equal((result.details as AskDetails).outcome, "timed-out");
+	assert.deepEqual(result.structuredContent, result.details);
 	assert.match(result.content[0].text, /^No answer yet: bravo \(.*\) did not answer your ask \S+ within 10 minutes/);
 	assert.match(result.content[0].text, /A later answer arrives as a message\.$/);
 	assert.equal(records().get(a.id)?.waitingOn, "");
@@ -737,6 +779,7 @@ test("the user stopping the run ends the wait", async () => {
 	stop.abort();
 	const result = await asked;
 	assert.equal((result.details as AskDetails).outcome, "stopped-by-user");
+	assert.deepEqual(result.structuredContent, result.details);
 	assert.match(result.content[0].text, /^The user stopped the wait for your ask/);
 	assert.equal(records().get(a.id)?.waitingOn, "");
 	await a.shutdown();
@@ -749,6 +792,7 @@ test("a target whose record disappears mid-wait is reported as stopped running",
 	await b.shutdown();
 	const result = await asked;
 	assert.equal((result.details as AskDetails).outcome, "stopped-running");
+	assert.deepEqual(result.structuredContent, result.details);
 	assert.match(result.content[0].text, /^bravo \(.*\) stopped running before it answered your ask/);
 	await a.shutdown();
 });
@@ -892,6 +936,8 @@ test("a reply mid-run answers the ask before the answerer settles, and settle se
 	assert.equal(answer.hops, 2);
 	assert.deepEqual(answer.in_reply_to, [ask.id]);
 	assert.match(replied.content[0].text, new RegExp(`^Answered ask ${ask.id} from alpha`));
+	assert.deepEqual(replied.structuredContent, { id: answer.id, ask: ask.id, to: a.id });
+	assert.deepEqual(replied.structuredContent, replied.details);
 	await b.agentEnd("the final message");
 	await b.settle();
 	assert.equal(envelopes(a.id, "new").length + envelopes(a.id, "cur").length, 1, "no second answer");

@@ -118,10 +118,63 @@ function checkHops(hops: number, hooks: ToolHooks): void {
 	);
 }
 
-/** The one result every tool returns. */
-function toolResult(text: string, details: unknown = {}) {
-	return { content: [{ type: "text" as const, text }], details };
+/**
+ * The one result every tool returns. `structuredContent` is what codemode scripts
+ * receive; it must match the tool's `outputSchema`, which Pi does not check.
+ */
+function toolResult<D, S>(text: string, details: D, structuredContent: S) {
+	return { content: [{ type: "text" as const, text }], details, structuredContent };
 }
+
+/** Hints for a tool that adds mail and never deletes or overwrites any, on this machine only. */
+const SENDS_MAIL = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+
+const SessionList = Type.Object({
+	sessions: Type.Array(
+		Type.Object({
+			id: Type.String({ description: "The session's full id; pass it as `to`" }),
+			name: Type.Optional(Type.String({ description: "The session name; absent when none is set" })),
+			cwd: Type.String(),
+			state: Type.Union([Type.Literal("idle"), Type.Literal("busy")]),
+			waitingOn: Type.Optional(
+				Type.String({ description: "The full id of the session this one's ask waits on; absent when none" }),
+			),
+			self: Type.Boolean({ description: "True for the calling session" }),
+		}),
+	),
+});
+
+const SendResult = Type.Object({
+	id: Type.String({ description: "The message's id" }),
+	to: Type.String({ description: "The recipient's full id" }),
+	running: Type.Boolean({ description: "False when the message waits in a closed session's inbox" }),
+});
+
+const asked = {
+	id: Type.String({ description: "The ask's id" }),
+	to: Type.String({ description: "The asked session's full id" }),
+};
+
+/** One variant per {@link AskOutcome}, told apart by `outcome`. */
+const AskResult = Type.Union([
+	Type.Object({
+		...asked,
+		outcome: Type.Literal("answered"),
+		status: Type.String({
+			description: '"done" for an answer; any other status means the run ended otherwise, and body is not an answer',
+		}),
+		body: Type.String(),
+	}),
+	Type.Object({ ...asked, outcome: Type.Literal("timed-out") }),
+	Type.Object({ ...asked, outcome: Type.Literal("stopped-running") }),
+	Type.Object({ ...asked, outcome: Type.Literal("stopped-by-user") }),
+]);
+
+const ReplyResult = Type.Object({
+	id: Type.String({ description: "The reply's id" }),
+	ask: Type.String({ description: "The id of the ask it answers" }),
+	to: Type.String({ description: "The asker's full id" }),
+});
 
 /** One running session as the list shows it. */
 function describe(record: RunningRecord, byAddress: ReadonlyMap<string, RunningRecord>, me: string): string {
@@ -170,16 +223,31 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 		description:
 			"List the Pi sessions running on this machine, in every agent root: each one's name (or short id when it has none), full id, working directory, idle or busy state, and whom it is waiting on. The calling session is marked. A session is addressed by its name, its full id, or an id prefix of at least 8 characters.",
 		parameters: Type.Object({}),
+		outputSchema: SessionList,
+		// Listing deletes the records of sessions whose process is gone, which is housekeeping, not a change.
+		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 		async execute(_toolCallId: string, _params: unknown, _signal: unknown, _onUpdate: unknown, ctx: ExtensionContext) {
 			const me = ctx.sessionManager.getSessionId();
 			const running = listRunning();
-			if (running.length === 0) return toolResult("No Pi sessions are running with a mailbox.", { sessions: [] });
+			if (running.length === 0)
+				return toolResult("No Pi sessions are running with a mailbox.", { sessions: [] }, { sessions: [] });
 			const byAddress = new Map(running.map((record) => [record.address, record]));
 			const lines = running.map((record) => describe(record, byAddress, me));
 			const count = `${running.length} running session${running.length === 1 ? "" : "s"}:`;
-			return toolResult([count, ...lines].join("\n"), {
-				sessions: running.map((record) => ({ ...record, self: record.address === me })),
-			});
+			return toolResult(
+				[count, ...lines].join("\n"),
+				{ sessions: running.map((record) => ({ ...record, self: record.address === me })) },
+				{
+					sessions: running.map(({ address, name, cwd, state, waitingOn }) => ({
+						id: address,
+						...(name === undefined ? {} : { name }),
+						cwd,
+						state,
+						...(waitingOn === "" ? {} : { waitingOn }),
+						self: address === me,
+					})),
+				},
+			);
 		},
 	});
 
@@ -196,6 +264,8 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 				description: "The message text. The recipient sees it labelled as coming from this session.",
 			}),
 		}),
+		outputSchema: SendResult,
+		annotations: SENDS_MAIL,
 		async execute(
 			_toolCallId: string,
 			params: { to: string; message: string },
@@ -216,7 +286,8 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 				target === undefined
 					? `Message ${envelope.id} left for ${to}, which is not running: it waits in that session's inbox and is delivered when the session starts or resumes.`
 					: `Sent message ${envelope.id} to ${label(target)} (${to}). It expects no answer; any answer arrives as a message.`;
-			return toolResult(text, { id: envelope.id, to, running: target !== undefined });
+			const result = { id: envelope.id, to, running: target !== undefined };
+			return toolResult(text, result, result);
 		},
 	});
 
@@ -234,6 +305,8 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 					"The question. The recipient sees it labelled as coming from this session, with this session waiting.",
 			}),
 		}),
+		outputSchema: AskResult,
+		annotations: SENDS_MAIL,
 		async execute(
 			_toolCallId: string,
 			params: { to: string; message: string },
@@ -283,7 +356,8 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 				if (signal?.aborted) onAbort();
 				else signal?.addEventListener("abort", onAbort, { once: true });
 			});
-			return toolResult(askText(ask, target, outcome), { id: ask.id, to, ...outcome });
+			const result = { id: ask.id, to, ...outcome };
+			return toolResult(askText(ask, target, outcome), result, result);
 		},
 	});
 
@@ -296,6 +370,9 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 			ask: Type.String({ description: "The ask id, as given in the ask's label." }),
 			message: Type.String({ description: "The answer." }),
 		}),
+		outputSchema: ReplyResult,
+		// A repeated reply to the same ask is refused and sends nothing.
+		annotations: { ...SENDS_MAIL, idempotentHint: true },
 		async execute(
 			_toolCallId: string,
 			params: { ask: string; message: string },
@@ -310,11 +387,12 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 			hooks.sent();
 			const sender = listRunning().find((record) => record.address === answer.to);
 			const who = sender === undefined ? answer.to : `${label(sender)} (${answer.to})`;
-			return toolResult(`Answered ask ${id} from ${who}; this run's last message will not be sent for it.`, {
-				id: answer.id,
-				ask: id,
-				to: answer.to,
-			});
+			const result = { id: answer.id, ask: id, to: answer.to };
+			return toolResult(
+				`Answered ask ${id} from ${who}; this run's last message will not be sent for it.`,
+				result,
+				result,
+			);
 		},
 	});
 

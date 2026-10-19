@@ -6,6 +6,20 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `session_mail_list`, `session_mail_send`, `session_mail_ask` and
+  `session_mail_reply` declare an `outputSchema` and return matching
+  `structuredContent`, so a codemode script gets objects instead of text:
+  `{ sessions: [{ id, name?, cwd, state, waitingOn?, self }] }` from the list,
+  `{ id, to, running }` from a send, `{ id, to, outcome, status?, body? }`
+  from an ask (one variant per `outcome`: `answered`, `timed-out`,
+  `stopped-running`, `stopped-by-user`) and `{ id, ask, to }` from a reply.
+  The text the model sees is unchanged.
+- The four tools declare all four MCP tool annotations: the list is read-only
+  and idempotent; send, ask and reply are not read-only and not destructive;
+  reply is idempotent, since a repeat is refused; none reaches an open world.
+
 ## [0.2.2] - 2026-10-02
 
 ### Fixed
