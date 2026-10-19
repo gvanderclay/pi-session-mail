@@ -10,7 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after } from "node:test";
 
-import { createEventBus } from "@earendil-works/pi-coding-agent";
+import { createEventBus, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Value } from "typebox/value";
 
 import register from "../src/index.ts";
 
@@ -47,10 +48,12 @@ export type Sent = {
 	options: unknown;
 };
 type Handler = (event: unknown, ctx: unknown) => unknown;
-type ToolResult = { content: { type: string; text: string }[]; details: unknown };
+type ToolResult = { content: { type: string; text: string }[]; details: unknown; structuredContent?: unknown };
 type Tool = {
 	name: string;
 	description: string;
+	outputSchema?: ToolDefinition["outputSchema"];
+	annotations?: ToolDefinition["annotations"];
 	execute: (id: string, params: unknown, signal: unknown, onUpdate: unknown, ctx: unknown) => Promise<ToolResult>;
 };
 
@@ -126,10 +129,17 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 		tools: () => Object.keys(tools).sort(),
 		tool: (toolName: string) => tools[toolName],
 		/** Call a registered tool; `signal` stands in for the user stopping the run. */
-		toolCall: (toolName: string, params: unknown = {}, signal?: AbortSignal): Promise<ToolResult> => {
+		// Pi passes `structuredContent` on unchecked, so every result a test sees is checked against the tool's `outputSchema` here.
+		toolCall: async (toolName: string, params: unknown = {}, signal?: AbortSignal): Promise<ToolResult> => {
 			const tool = tools[toolName];
-			if (tool === undefined) return Promise.reject(new Error(`no tool named ${toolName} is registered`));
-			return tool.execute(`call-${++calls}`, params, signal, undefined, ctx);
+			if (tool === undefined) throw new Error(`no tool named ${toolName} is registered`);
+			const result = await tool.execute(`call-${++calls}`, params, signal, undefined, ctx);
+			if (tool.outputSchema !== undefined)
+				assert.ok(
+					Value.Check(tool.outputSchema, result.structuredContent),
+					`${toolName} returned structuredContent that does not match its outputSchema: ${JSON.stringify(result.structuredContent)} ${JSON.stringify([...Value.Errors(tool.outputSchema, result.structuredContent)])}`,
+				);
+			return result;
 		},
 		/** Hold back injected messages from the conversation (on) or let them in again (off). */
 		drop: (on: boolean) => {
