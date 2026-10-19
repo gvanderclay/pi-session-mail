@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-19
+
 ### Added
 
 - `session_mail_list`, `session_mail_send`, `session_mail_ask` and
@@ -132,7 +134,8 @@ author's dotfiles; the changes below are against that copy.
 - CI on Node 22.19 and 24: lint, typecheck, tests, and a check of the
   published file list.
 
-[Unreleased]: https://github.com/gvanderclay/pi-session-mail/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/gvanderclay/pi-session-mail/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/gvanderclay/pi-session-mail/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/gvanderclay/pi-session-mail/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/gvanderclay/pi-session-mail/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/gvanderclay/pi-session-mail/compare/v0.1.0...v0.2.0
