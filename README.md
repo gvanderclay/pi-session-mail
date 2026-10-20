@@ -27,11 +27,22 @@ pi install git:github.com/gvanderclay/pi-session-mail
 
 ## First use
 
-In a Pi session, show its address and name:
+In a Pi session, open a picker of this session's mail:
 
 ```text
 /mailbox
 ```
+
+Its title names the session, its short address and the filter. The picker opens
+on unread when there is unread mail, and on all otherwise. `s` cycles the filter
+through unread, awaiting, read, sent and all. Each row shows the first line of
+the mail, the other session (`from` for mail it received, `to` for mail it
+sent), the kind and how long ago it was sent; the all and sent views also show
+its status, and an awaiting row says whether its target is still running or
+has closed. Enter opens the whole mail: the other session's name and full
+address, the kind, the id, the absolute time, what it answers and the full
+text. Esc goes back to the list, and Esc there closes the picker. Showing mail
+never marks it read, so the footer's count stays until the model sees it.
 
 The session's id is its address. Other sessions see its Pi session name (set it
 with `/name`), or the first 8 characters of its id when it has none.

@@ -8,6 +8,13 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Bare `/mailbox` opens a picker of this session's mail. Its title carries the
+  session's name (or short id) and short address, `s` cycles unread, awaiting,
+  read, sent and all, and each row shows the first line, the other session, the
+  kind and a relative time, with the status in the all and sent views and the
+  running or closed marker on awaiting rows. Enter opens the whole mail and Esc
+  goes back, then closes. It opens on unread when there is unread mail, and
+  showing mail never marks it read.
 - `/mailbox:send` lists the other running sessions, asks for the text and
   sends it as a message, which expects no answer.
 - `/mailbox:prune` removes closed sessions' mailbox folders without the age
@@ -15,6 +22,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Bare `/mailbox` no longer prints the address and name notice; the picker's
+  title carries them. Its tests now open the picker and assert the title.
 - The footer shows only `📬 N unread`: mail that reached this session but has
   not entered its conversation yet. It clears as each message enters, not when
   the run settles. The `read` and `awaiting` counts are gone from it, because

@@ -10,6 +10,8 @@ import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync,
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
+import { type MailFile, mailStatus } from "./mail-status.ts";
+
 /** What an envelope is: answered at settle, waited on, plain, or an answer. */
 export type Kind = "request" | "ask" | "message" | "reply";
 const KINDS: readonly Kind[] = ["request", "ask", "message", "reply"];
@@ -170,28 +172,39 @@ export type SentCopy = { envelope: Envelope; path: string };
 
 const isHops = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value >= 0;
 
+/** The request ids an envelope answers; throws when the list is not a short list of strings. */
+function replyIds(value: unknown): string[] {
+	if (!Array.isArray(value) || !value.every((id) => typeof id === "string"))
+		throw new Error("in_reply_to is not a list of ids");
+	if (value.length > MAX_REPLY_IDS) throw new Error(`in_reply_to names more than ${MAX_REPLY_IDS} requests`);
+	return value;
+}
+
 /**
- * Parse an envelope file; throws when it is not a well-formed envelope from a
+ * Parse an envelope value; throws when it is not a well-formed envelope from a
  * valid address. An envelope written before `kind` and `hops` existed is read
  * as a reply when it answers something and as a request otherwise, with hops 0.
  * A `kind` this version does not know is read as `message`, so mail from a
  * newer copy is delivered rather than stranded; the original value is dropped.
  */
-export function readEnvelope(path: string): Envelope {
-	const value = JSON.parse(readFileSync(path, "utf8")) as Partial<Envelope>;
+function parseEnvelope(value: unknown): Envelope {
 	if (typeof value !== "object" || value === null) throw new Error("not an object");
-	if (typeof value.id !== "string" || value.id === "") throw new Error("missing id");
-	if (!isAddress(value.from)) throw new Error(`invalid from address ${JSON.stringify(value.from)}`);
-	if (!Array.isArray(value.in_reply_to) || !value.in_reply_to.every((id) => typeof id === "string"))
-		throw new Error("in_reply_to is not a list of ids");
-	if (value.in_reply_to.length > MAX_REPLY_IDS)
-		throw new Error(`in_reply_to names more than ${MAX_REPLY_IDS} requests`);
-	if (typeof value.body !== "string") throw new Error("missing body");
-	if (value.kind === undefined) value.kind = value.in_reply_to.length > 0 ? "reply" : "request";
-	else if (!KINDS.includes(value.kind)) value.kind = "message";
-	if (value.hops === undefined) value.hops = 0;
-	else if (!isHops(value.hops)) throw new Error(`invalid hops ${JSON.stringify(value.hops)}`);
-	return value as Envelope;
+	// Copy so the raw parsed fields stay as written for `diskCounts`.
+	const envelope = { ...value } as Partial<Envelope>;
+	if (typeof envelope.id !== "string" || envelope.id === "") throw new Error("missing id");
+	if (!isAddress(envelope.from)) throw new Error(`invalid from address ${JSON.stringify(envelope.from)}`);
+	envelope.in_reply_to = replyIds(envelope.in_reply_to);
+	if (typeof envelope.body !== "string") throw new Error("missing body");
+	if (envelope.kind === undefined) envelope.kind = envelope.in_reply_to.length > 0 ? "reply" : "request";
+	else if (!KINDS.includes(envelope.kind)) envelope.kind = "message";
+	if (envelope.hops === undefined) envelope.hops = 0;
+	else if (!isHops(envelope.hops)) throw new Error(`invalid hops ${JSON.stringify(envelope.hops)}`);
+	return envelope as Envelope;
+}
+
+/** Parse an envelope file; throws when it is not a well-formed envelope. */
+export function readEnvelope(path: string): Envelope {
+	return parseEnvelope(JSON.parse(readFileSync(path, "utf8")));
 }
 
 /**
@@ -226,31 +239,64 @@ export function findSent(address: string, ids: readonly string[]): Map<string, S
 	return found;
 }
 
-function envelopesIn(address: string, box: Box): Partial<Envelope>[] {
+/** Every regular `.json` file in `box`, with its path, its parsed JSON and the envelope when valid. */
+function envelopesIn(
+	address: string,
+	box: Box,
+): { path: string; parsed?: unknown; envelope?: Envelope; error?: string }[] {
 	const dir = boxPath(address, box);
-	const out: Partial<Envelope>[] = [];
+	const out: { path: string; parsed?: unknown; envelope?: Envelope; error?: string }[] = [];
 	for (const name of jsonFiles(address, box)) {
+		const path = join(dir, name);
+		let parsed: unknown;
+		let envelope: Envelope | undefined;
+		let error: string | undefined;
 		try {
-			out.push(JSON.parse(readFileSync(join(dir, name), "utf8")));
-		} catch {
-			out.push({});
+			parsed = JSON.parse(readFileSync(path, "utf8"));
+		} catch (err) {
+			error = (err as Error).message;
 		}
+		if (error === undefined) {
+			try {
+				const valid = parseEnvelope(parsed);
+				// The picker shows `to` and sorts by `ts`; delivery does not need them, so only this reader requires them.
+				if (!isAddress(valid.to)) throw new Error(`invalid to address ${JSON.stringify(valid.to)}`);
+				if (typeof valid.ts !== "string") throw new Error("missing ts");
+				envelope = valid;
+			} catch (err) {
+				error = (err as Error).message;
+			}
+		}
+		out.push({ path, parsed, envelope, error });
 	}
 	return out;
 }
 
+/** One file in a session's mailbox: its box, its path, and the envelope it holds when valid. */
+export type InboxFile = MailFile<Envelope> & { path: string; error?: string };
+
+/** Every regular file in this session's `new/`, `cur/` and `sent/`, each with its box and path. */
+export function readMailbox(address: string): InboxFile[] {
+	const out: InboxFile[] = [];
+	for (const box of ["new", "cur", "sent"] as const)
+		for (const file of envelopesIn(address, box)) out.push({ box, ...file });
+	return out;
+}
+
 /**
- * Counts derived from disk: files still in `new/`, envelopes in `cur/`, and
- * requests (not messages) in `sent/` that no envelope in `cur/` answers.
+ * Counts derived from disk: files still in `new/`, files in `cur/`, and
+ * requests (not messages) in `sent/` with a string id that no `cur/` file names
+ * in its `in_reply_to`. It counts the raw parsed JSON, as older copies did, so
+ * sessions running either version agree.
  */
 export function diskCounts(address: string): { unclaimed: number; read: number; awaiting: number } {
-	const cur = envelopesIn(address, "cur");
-	const answered = new Set(cur.flatMap((e) => (Array.isArray(e.in_reply_to) ? e.in_reply_to : [])));
-	// A message expects no answer, so it never counts as awaiting one.
-	const awaiting = envelopesIn(address, "sent").filter(
-		(e) => typeof e.id === "string" && e.kind !== "message" && !answered.has(e.id),
-	).length;
-	return { unclaimed: listNew(address).length, read: cur.length, awaiting };
+	const files = readMailbox(address);
+	const statuses = mailStatus(files, new Set());
+	return {
+		unclaimed: files.filter((file) => file.box === "new").length,
+		read: files.filter((file) => file.box === "cur").length,
+		awaiting: statuses.filter((file) => file.status === "awaiting").length,
+	};
 }
 
 // ---------------------------------------------------------------------------

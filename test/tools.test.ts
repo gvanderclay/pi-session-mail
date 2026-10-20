@@ -223,16 +223,23 @@ test("with no records the list says no session is running", async () => {
 // ---------------------------------------------------------------------------
 // Addressing
 
-test("/mailbox with no arguments shows the address and the name, or the short id others see", async () => {
+test("/mailbox opens the picker titled with the name and short id, or the short id alone", async () => {
 	const a = session(newId(), { name: "planner" });
-	await a.mailbox("");
-	assert.equal(a.notes.at(-1), `Mailbox address: ${a.id}\nName: planner`);
+	const opened = a.mailbox("");
+	await until(() => a.dialogs.length === 1, "the picker to open");
+	const title = a.dialogs[0].component.render(80).join("\n");
+	assert.ok(title.includes(`Mailbox · planner · ${a.id.slice(0, 8)} · all`), title);
+	await a.dialogs[0].press("\x1b");
+	await opened;
+
 	const b = session(newId());
-	await b.mailbox("");
-	assert.equal(
-		b.notes.at(-1),
-		`Mailbox address: ${b.id}\nName: none; other sessions see ${b.id.slice(0, 8)} (set one with /name)`,
-	);
+	const other = b.mailbox("");
+	await until(() => b.dialogs.length === 1, "the second picker to open");
+	const short = b.dialogs[0].component.render(80).join("\n");
+	assert.ok(short.includes(`Mailbox · ${b.id.slice(0, 8)} · all`), short);
+	await b.dialogs[0].press("\x1b");
+	await other;
+	await Promise.all([a.shutdown(), b.shutdown()]);
 });
 
 // ---------------------------------------------------------------------------
@@ -304,6 +311,50 @@ test("a message gets no answer at settle while a request in the same run still d
 	assert.equal(answers[0].body, "the answer");
 	await a.shutdown();
 	await b.shutdown();
+});
+
+test("diskCounts keeps the older awaiting rule for files the envelope reader rejects or normalises", () => {
+	const plant = (address: string, boxName: "cur" | "sent", name: string, value: unknown) => {
+		const dir = join(stateRoot(), address, boxName);
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		writeFileSync(join(dir, `${name}.json`), JSON.stringify(value));
+	};
+
+	// A bare sent object with a string id and a non-message kind: the old rule counts it.
+	const bare = newId();
+	plant(bare, "sent", "000000000000001-req", { id: "req", kind: "request" });
+	assert.deepEqual(diskCounts(bare), { unclaimed: 0, read: 0, awaiting: 1 });
+
+	// A valid envelope with a kind this version normalises to message still counts as the old raw kind did.
+	const future = newId();
+	plant(future, "sent", "000000000000001-future", {
+		id: "future",
+		from: newId(),
+		to: future,
+		kind: "shout",
+		hops: 0,
+		in_reply_to: [],
+		status: "",
+		ts: "",
+		body: "from the future",
+	});
+	assert.deepEqual(diskCounts(future), { unclaimed: 0, read: 0, awaiting: 1 });
+
+	// A partial cur object still answers the request its raw in_reply_to names.
+	const answered = newId();
+	plant(answered, "sent", "000000000000001-req", {
+		id: "req",
+		from: newId(),
+		to: answered,
+		kind: "request",
+		hops: 0,
+		in_reply_to: [],
+		status: "",
+		ts: "",
+		body: "still waiting?",
+	});
+	plant(answered, "cur", "000000000000002-reply", { id: "reply", in_reply_to: ["req"] });
+	assert.deepEqual(diskCounts(answered), { unclaimed: 0, read: 1, awaiting: 0 });
 });
 
 test("a message to a closed session's full id waits in its new/, and the result says so", async () => {
