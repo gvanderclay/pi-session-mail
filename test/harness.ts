@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { after } from "node:test";
 
 import { createEventBus, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { Component } from "@earendil-works/pi-tui";
 import { Value } from "typebox/value";
 
 import register from "../src/index.ts";
@@ -57,6 +58,47 @@ type Tool = {
 	execute: (id: string, params: unknown, signal: unknown, onUpdate: unknown, ctx: unknown) => Promise<ToolResult>;
 };
 
+/**
+ * The `theme` a fake `custom` hands its factory. Every styling function returns
+ * its text unchanged, so rendered lines carry no ANSI escape sequences. A test
+ * that needs a `SelectListTheme` builds one from these, never from
+ * `getSelectListTheme()`, which reads Pi's global theme while rendering.
+ */
+export const theme = {
+	fg: (_color: string, text: string) => text,
+	bg: (_color: string, text: string) => text,
+	bold: (text: string) => text,
+	italic: (text: string) => text,
+	underline: (text: string) => text,
+	inverse: (text: string) => text,
+	strikethrough: (text: string) => text,
+};
+
+/** The `TUI` a fake `custom` hands its factory: it has a height to lay out in and never draws. */
+type FakeTui = { requestRender: () => void; terminal: { rows: number } };
+const tui: FakeTui = { requestRender: () => {}, terminal: { rows: 24 } };
+
+/** The `Theme` a fake `custom` hands its factory: see `theme` above. */
+type FakeTheme = typeof theme;
+
+/** What a fake `custom` factory may return: any component, sync or promised. */
+type CustomFactory<T> = (
+	tui: FakeTui,
+	theme: FakeTheme,
+	keybindings: unknown,
+	done: (result: T) => void,
+) => Component | Promise<Component>;
+
+/** One `ctx.ui.custom` call: the live component and what it resolved with. */
+export type Dialog = {
+	/** Drive it with `handleInput` and read `render(width)`. */
+	component: Component;
+	/** What the component called `done` with; undefined until it does. */
+	result: () => unknown;
+	/** Press keys as the terminal would, then let the command handler run a turn. */
+	press: (data: string) => Promise<void>;
+};
+
 /** One fake Pi session running the extension under `sessionId`. */
 export function session(sessionId: string, opts: { hasUI?: boolean; name?: string; cwd?: string } = {}) {
 	const commands: Record<string, (args: string, ctx: unknown) => Promise<void>> = {};
@@ -67,6 +109,16 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 	const warnings: string[] = [];
 	const errors: string[] = [];
 	const statuses = new Map<string, string | undefined>();
+	const dialogs: Dialog[] = [];
+	/** The answers `select`, `input` and `confirm` return, in the order a test scripts them; none left means cancelled. */
+	const answers = {
+		select: [] as (string | undefined)[],
+		input: [] as (string | undefined)[],
+		confirm: [] as boolean[],
+	};
+	const selects: { title: string; options: string[] }[] = [];
+	const inputs: { title: string; placeholder?: string }[] = [];
+	const confirms: { title: string; message: string }[] = [];
 	let statusCalls = 0;
 	let name = opts.name;
 	let idle = true;
@@ -107,6 +159,40 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 				statusCalls++;
 				statuses.set(key, text);
 			},
+			select: async (title: string, options: string[]) => {
+				selects.push({ title, options });
+				const answer = answers.select.shift();
+				assert.ok(
+					answer === undefined || options.includes(answer),
+					`select ${JSON.stringify(title)} was not offered ${JSON.stringify(answer)}`,
+				);
+				return answer;
+			},
+			input: async (title: string, placeholder?: string) => {
+				inputs.push({ title, placeholder });
+				return answers.input.shift();
+			},
+			confirm: async (title: string, message: string) => {
+				confirms.push({ title, message });
+				return answers.confirm.shift() ?? false;
+			},
+			custom: async <T>(factory: CustomFactory<T>): Promise<T> => {
+				const settles = Promise.withResolvers<T>();
+				let result: T;
+				const component = await factory(tui, theme, {}, (value) => {
+					result = value;
+					settles.resolve(value);
+				});
+				dialogs.push({
+					component,
+					result: () => result,
+					press: async (data) => {
+						await component.handleInput?.(data);
+						await turn();
+					},
+				});
+				return settles.promise;
+			},
 		},
 	};
 	register(pi as never);
@@ -116,6 +202,13 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 		for (const h of handlers[event] ?? []) await h({ type: event, ...payload }, ctx);
 	};
 	let calls = 0;
+	/** Run a registered command by its full name, colon included (`mailbox`, `mailbox:send`). */
+	const command = async (name: string, args = "") => {
+		if (!started) await fire("session_start", { reason: "startup" });
+		const handler = commands[name];
+		if (handler === undefined) throw new Error(`no command named ${name} is registered`);
+		return handler(args, ctx);
+	};
 	return {
 		id: sessionId,
 		pi,
@@ -124,6 +217,13 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 		notes,
 		warnings,
 		errors,
+		ui: ctx.ui,
+		dialogs,
+		answers,
+		selects,
+		inputs,
+		confirms,
+		command,
 		status: () => statuses.get("mailbox"),
 		statusCalls: () => statusCalls,
 		tools: () => Object.keys(tools).sort(),
@@ -146,10 +246,7 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 			dropping = on;
 		},
 		/** Run `/mailbox args`; Pi starts a session before any command, so a session not yet started starts first. */
-		mailbox: async (args: string) => {
-			if (!started) await fire("session_start", { reason: "startup" });
-			return commands.mailbox(args, ctx);
-		},
+		mailbox: (args: string) => command("mailbox", args),
 		/** Rename the session, as `/name` does, and tell the extension. */
 		setName: (next: string | undefined) => {
 			name = next;
