@@ -29,12 +29,13 @@ import { dirname } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { mailStatus } from "./mail-status.ts";
-import { type Peer, type PickerItem, type PickResult, picker } from "./picker.ts";
+import { type Peer, type PickerFilter, type PickerItem, type PickResult, picker } from "./picker.ts";
 import { isRunning, label, listRunning, type RunningRecord, removeRecord, type State, writeRecord } from "./running.ts";
 import { type SettleInput, settle } from "./settle.ts";
 import {
 	boxPath,
 	claim,
+	deleteMail,
 	type Envelope,
 	ensureBoxes,
 	findSent,
@@ -297,49 +298,73 @@ export default function mailbox(pi: ExtensionAPI) {
 
 	/**
 	 * Open the picker on this session's mail. It opens on unread when anything is
-	 * unread, otherwise on all; it changes nothing on disk and never touches the
-	 * unread set, so the footer keeps saying the model has not seen that mail yet.
+	 * unread, otherwise on all; `d` deletes the selected read or sent item after a
+	 * confirmation, and the picker reopens on the same filter with the row that
+	 * took the deleted one's place selected. It never touches the unread set, so
+	 * the footer keeps saying the model has not seen that mail yet.
 	 */
 	async function openMailbox(me: string, context: ExtensionContext) {
-		try {
-			const files = readMailbox(me);
-			const unreadable = files.filter((file) => file.error !== undefined).length;
-			if (unreadable > 0) context.ui.notify(`mailbox: ${unreadable} files could not be read`, "warning");
-			const records = listRunning();
-			const items: PickerItem[] = [];
-			for (const file of mailStatus(files, unread)) {
-				const envelope = file.envelope;
-				if (envelope === undefined || file.status === undefined) continue;
-				items.push({
-					id: envelope.id,
-					box: file.box,
-					from: envelope.from,
-					to: envelope.to,
-					kind: envelope.kind,
-					inReplyTo: envelope.in_reply_to,
-					ts: envelope.ts,
-					body: envelope.body,
-					status: file.status,
-				});
-			}
-			const labels = new Map(records.map((record) => [record.address, label(record)]));
-			const running = new Set(records.map((record) => record.address));
-			const peers = new Map<string, Peer>();
-			for (const item of items)
-				for (const target of [item.from, item.to]) {
-					if (peers.has(target)) continue;
-					peers.set(target, {
-						label: labels.get(target) ?? label({ address: target }),
-						running: running.has(target),
+		let filter: PickerFilter | undefined;
+		let selectedId: string | undefined;
+		let selectedIndex = 0;
+		for (;;) {
+			let result: PickResult;
+			try {
+				const files = readMailbox(me);
+				const unreadable = files.filter((file) => file.error !== undefined).length;
+				if (unreadable > 0) context.ui.notify(`mailbox: ${unreadable} files could not be read`, "warning");
+				const records = listRunning();
+				const items: PickerItem[] = [];
+				for (const file of mailStatus(files, unread)) {
+					const envelope = file.envelope;
+					if (envelope === undefined || file.status === undefined) continue;
+					items.push({
+						id: envelope.id,
+						box: file.box,
+						from: envelope.from,
+						to: envelope.to,
+						kind: envelope.kind,
+						inReplyTo: envelope.in_reply_to,
+						ts: envelope.ts,
+						body: envelope.body,
+						status: file.status,
 					});
 				}
-			const current = context.sessionManager.getSessionName?.() || undefined;
-			const short = me.slice(0, 8);
-			const title = `Mailbox · ${current === undefined ? short : `${current} · ${short}`}`;
-			const filter = items.some((item) => item.status === "unread") ? "unread" : "all";
-			await context.ui.custom<PickResult>(picker({ items, peers, title, now: Date.now(), filter }));
-		} catch (err) {
-			context.ui.notify(`mailbox: ${(err as Error).message}`, "error");
+				const labels = new Map(records.map((record) => [record.address, label(record)]));
+				const running = new Set(records.map((record) => record.address));
+				const peers = new Map<string, Peer>();
+				for (const item of items)
+					for (const target of [item.from, item.to]) {
+						if (peers.has(target)) continue;
+						peers.set(target, {
+							label: labels.get(target) ?? label({ address: target }),
+							running: running.has(target),
+						});
+					}
+				const current = context.sessionManager.getSessionName?.() || undefined;
+				const short = me.slice(0, 8);
+				const title = `Mailbox · ${current === undefined ? short : `${current} · ${short}`}`;
+				filter ??= items.some((item) => item.status === "unread") ? "unread" : "all";
+				result = await context.ui.custom<PickResult>(
+					picker({ items, peers, title, now: Date.now(), filter, selectedId, selectedIndex }),
+				);
+			} catch (err) {
+				context.ui.notify(`mailbox: ${(err as Error).message}`, "error");
+				return;
+			}
+			if (result.action === "close") return;
+			try {
+				if (await context.ui.confirm("Delete this mail?", result.firstLine)) {
+					const file = readMailbox(me).find((f) => f.box === result.box && f.envelope?.id === result.id);
+					if (file !== undefined) deleteMail(me, file.path);
+				}
+			} catch (err) {
+				context.ui.notify(`mailbox: ${(err as Error).message}`, "error");
+			}
+			// A cancelled confirm leaves the item in place, so the picker reselects it by id.
+			filter = result.filter;
+			selectedId = result.id;
+			selectedIndex = result.index;
 		}
 	}
 
