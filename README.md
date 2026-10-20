@@ -34,8 +34,8 @@ In a Pi session, open a picker of this session's mail:
 ```
 
 Its title names the session, its short address and the filter. The picker opens
-on unread when there is unread mail, and on all otherwise. `s` cycles the filter
-through unread, awaiting, read, sent and all. Each row shows the first line of
+on unread when there is unread mail, and on all otherwise. Tab cycles the filter
+through unread, awaiting, read, sent and all, and Shift+Tab goes back. Each row shows the first line of
 the mail, the other session (`from` for mail it received, `to` for mail it
 sent), the kind and how long ago it was sent; the all and sent views also show
 its status, and an awaiting row says whether its target is still running or

@@ -1,5 +1,5 @@
-// The `/mailbox` picker: one list of this session's mail, the filter the `s`
-// key cycles, and a detail screen for the selected item. It reads no files,
+// The `/mailbox` picker: one list of this session's mail, the filter Tab
+// (Shift+Tab backwards) cycles, and a detail screen for the selected item. It reads no files,
 // running records or clock and imports none of them: the command handler
 // passes the items, a lookup from address to label and running state, the
 // current time, the title and the starting view. It resolves on Esc, or on `d`
@@ -20,7 +20,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { Status } from "./mail-status.ts";
 
-/** The filters `s` cycles, in order. */
+/** The filters Tab cycles, in order. */
 export type PickerFilter = "unread" | "awaiting" | "read" | "sent" | "all";
 const FILTERS: readonly PickerFilter[] = ["unread", "awaiting", "read", "sent", "all"];
 
@@ -190,8 +190,9 @@ export function picker(options: PickerOptions) {
 		build(options.selectedId, options.selectedIndex ?? 0);
 
 		const handleListInput = (data: string): void => {
-			if (data === "s") {
-				filter = FILTERS[(FILTERS.indexOf(filter) + 1) % FILTERS.length];
+			const next = nextFilter(filter, data);
+			if (next !== undefined) {
+				filter = next;
 				build(undefined, 0);
 				return;
 			}
@@ -207,7 +208,7 @@ export function picker(options: PickerOptions) {
 				const selected = shown.find((item) => item.id === list.getSelectedItem()?.value);
 				const deletableNow = selected !== undefined && deletable(selected);
 				const hint =
-					screen === "detail" ? "esc back" : `s filter · enter open${deletableNow ? " · d delete" : ""} · esc close`;
+					screen === "detail" ? "esc back" : `tab filter · enter open${deletableNow ? " · d delete" : ""} · esc close`;
 				return [
 					...border.render(width),
 					...new Text(theme.fg("accent", theme.bold(title)), 0, 0).render(width),
@@ -229,6 +230,15 @@ export function picker(options: PickerOptions) {
 			},
 		};
 	};
+}
+
+/** The filter Tab or Shift+Tab moves to from `filter`; undefined for any other key. */
+function nextFilter(filter: PickerFilter, data: string): PickerFilter | undefined {
+	let step = 0;
+	if (matchesKey(data, "tab")) step = 1;
+	else if (matchesKey(data, "shift+tab")) step = -1;
+	else return undefined;
+	return FILTERS[(FILTERS.indexOf(filter) + step + FILTERS.length) % FILTERS.length];
 }
 
 /** The items `filter` shows, newest first. */

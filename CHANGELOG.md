@@ -9,8 +9,8 @@ follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Bare `/mailbox` opens a picker of this session's mail. Its title carries the
-  session's name (or short id) and short address, `s` cycles unread, awaiting,
-  read, sent and all, and each row shows the first line, the other session, the
+  session's name (or short id) and short address, Tab cycles unread, awaiting,
+  read, sent and all (Shift+Tab goes back), and each row shows the first line, the other session, the
   kind and a relative time, with the status in the all and sent views and the
   running or closed marker on awaiting rows. Enter opens the whole mail and Esc
   goes back, then closes. It opens on unread when there is unread mail, and
