@@ -47,8 +47,9 @@ The sender sees `Sent <id> to <address>`. The recipient's model receives the
 text and works on it, and its last answer comes back to the sender as a reply
 when that run settles. [Addressing](#addressing) lists how `<to>` resolves.
 
-The footer shows `✉ N pending · N read · N awaiting`, non-zero counts only.
-`awaiting` counts requests and asks with no answer yet, never messages.
+The footer shows `📬 N unread` while mail has reached this session but not yet
+entered its conversation, such as mail queued behind a busy run; it is hidden
+at zero.
 
 ## How mail works
 

@@ -11,6 +11,7 @@ import { beforeEach, test } from "node:test";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 
+import { diskCounts } from "../src/store.ts";
 import { dir, envelopes, files, newId, records, session, stateRoot, turn, until } from "./harness.ts";
 
 let n = 0;
@@ -406,7 +407,7 @@ test("a message gets no answer at settle while a request in the same run still d
 	await a.toolCall("session_mail_send", { to: b.id, message: "fyi" });
 	await a.mailbox(`${b.id} a question`);
 	await until(() => b.sent.length === 2, "both to be injected");
-	assert.equal(a.status(), "✉ 1 awaiting");
+	assert.equal(diskCounts(a.id).awaiting, 1);
 	await b.answer("the answer");
 	const answers = envelopes(a.id, "new").concat(envelopes(a.id, "cur"));
 	assert.equal(answers.length, 1);

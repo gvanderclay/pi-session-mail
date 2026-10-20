@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
+import { diskCounts } from "../src/store.ts";
 import { box, dir, envelopes, newId, session, until } from "./harness.ts";
 
 const kind = process.argv[2];
@@ -28,12 +29,12 @@ try {
 	}
 	// Delivery: the request reaches B, and the earlier non-file must not count as read.
 	await until(() => b.sent.length === 1, "B to receive");
-	assert.equal(b.status(), "✉ 1 pending · 1 read");
+	assert.deepEqual(diskCounts(b.id), { unclaimed: 0, read: 1, awaiting: 0 });
 	// A reply quotes the request from A's sent/, next to the planted name.
 	await b.answer("answer");
 	await until(() => a.sent.length === 1, "A to receive the reply");
 	assert.match(a.sent[0].message.content, /question/);
-	assert.equal(a.status(), "✉ 1 pending · 1 read");
+	assert.deepEqual(diskCounts(a.id), { unclaimed: 0, read: 1, awaiting: 0 });
 	await a.shutdown();
 	await b.shutdown();
 } finally {
