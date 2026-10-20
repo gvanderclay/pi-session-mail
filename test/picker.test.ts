@@ -4,11 +4,12 @@
 // mail folders, so every test builds its own sessions and mail.
 
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { box, envelopes, newId, session, until } from "./harness.ts";
+import { deleteMail } from "../src/store.ts";
+import { box, envelopes, files, newId, session, until } from "./harness.ts";
 
 type Session = ReturnType<typeof session>;
 
@@ -57,6 +58,31 @@ const shown = (dialog: Session["dialogs"][number], text: string, width = 100): s
 	assert.ok(line, `no rendered row shows ${JSON.stringify(text)}`);
 	return line;
 };
+
+/** A message `from` sends to `me` while `me` listens, so it arrives read. */
+async function readMessage(me: Session, from: Session, text: string) {
+	const before = me.sent.length;
+	await from.toolCall("session_mail_send", { to: me.id, message: text });
+	await until(() => me.sent.length > before, `the read message ${text}`);
+}
+
+/** The picker the handler reopened after a confirm; the open command stays pending through its loop. */
+async function reopened(s: Session, before: number): Promise<Session["dialogs"][number]> {
+	await until(() => s.dialogs.length > before, "the picker to reopen");
+	return s.dialogs[before];
+}
+
+/** Press `d` on `dialog`, answer its confirm with `yes`, and return the picker it reopened. */
+async function deleteSelected(
+	s: Session,
+	dialog: Session["dialogs"][number],
+	yes: boolean,
+): Promise<Session["dialogs"][number]> {
+	const before = s.dialogs.length;
+	s.answers.confirm.push(yes);
+	await dialog.press("d");
+	return reopened(s, before);
+}
 
 test("s cycles five filters, each showing its own rows and statuses, newest first", async () => {
 	const { me, open, gone } = await mailInEveryState();
@@ -315,4 +341,286 @@ test("peer labels and running state are a snapshot taken before the picker opens
 		await me.shutdown();
 		if (!stopped) await peer.shutdown();
 	}
+});
+
+// --- Deleting and dropping ---
+
+test("d deletes a read message after a confirm, and the next row is selected", async () => {
+	const me = session(newId(), { name: "me" });
+	const peer = session(newId(), { name: "peer" });
+	await Promise.all([me.start(), peer.start()]);
+	await readMessage(me, peer, "first");
+	await readMessage(me, peer, "second");
+	await readMessage(me, peer, "third");
+	const idOf = (text: string) => envelopes(me.id, "cur").find((envelope) => envelope.body === text)?.id;
+	const { dialog, closed } = await openPicker(me);
+	let open = dialog;
+	try {
+		assert.ok(render(dialog).includes("· all"), "no unread mail, so the picker opens on all");
+		open = await deleteSelected(me, dialog, true);
+		assert.deepEqual(
+			me.confirms.map((confirm) => confirm.message),
+			["third"],
+			"the confirmation shows the selected item's first line",
+		);
+		assert.deepEqual(
+			envelopes(me.id, "cur").map((envelope) => envelope.body),
+			["first", "second"],
+			"only the deleted file is gone",
+		);
+		await open.press("\r");
+		assert.ok(render(open).includes(`Id ${idOf("second")}`), "the row that took the deleted one's place is selected");
+		await open.press("\x1b");
+	} finally {
+		await open.press("\x1b");
+		await closed;
+		await Promise.all([me.shutdown(), peer.shutdown()]);
+	}
+});
+
+test("deleting the last row caps the selection at the new last row", async () => {
+	const me = session(newId(), { name: "me" });
+	const peer = session(newId(), { name: "peer" });
+	await Promise.all([me.start(), peer.start()]);
+	await readMessage(me, peer, "first");
+	await readMessage(me, peer, "second");
+	await readMessage(me, peer, "third");
+	const idOf = (text: string) => envelopes(me.id, "cur").find((envelope) => envelope.body === text)?.id;
+	const { dialog, closed } = await openPicker(me);
+	let open = dialog;
+	try {
+		await open.press("\x1b[B");
+		await open.press("\x1b[B");
+		open = await deleteSelected(me, open, true);
+		assert.deepEqual(
+			me.confirms.map((confirm) => confirm.message),
+			["first"],
+			"the last row was selected",
+		);
+		assert.deepEqual(
+			envelopes(me.id, "cur").map((envelope) => envelope.body),
+			["second", "third"],
+		);
+		await open.press("\r");
+		assert.ok(render(open).includes(`Id ${idOf("second")}`), "the selection caps at the new last row");
+		await open.press("\x1b");
+	} finally {
+		await open.press("\x1b");
+		await closed;
+		await Promise.all([me.shutdown(), peer.shutdown()]);
+	}
+});
+
+test("a cancelled delete keeps the same row selected even after new mail arrives", async () => {
+	const me = session(newId(), { name: "me" });
+	const peer = session(newId(), { name: "peer" });
+	await Promise.all([me.start(), peer.start()]);
+	await readMessage(me, peer, "first");
+	await readMessage(me, peer, "second");
+	await readMessage(me, peer, "third");
+	const idOf = (text: string) => envelopes(me.id, "cur").find((envelope) => envelope.body === text)?.id;
+	const { dialog, closed } = await openPicker(me);
+	let open = dialog;
+	try {
+		await open.press("\x1b[B");
+		// Mail that arrives after the list was taken moves every row down one.
+		me.drop(true);
+		await peer.toolCall("session_mail_send", { to: me.id, message: "arrived later" });
+		await until(() => me.status() === "📬 1 unread", "the new mail to arrive");
+		open = await deleteSelected(me, open, false);
+		assert.deepEqual(
+			me.confirms.map((confirm) => confirm.message),
+			["second"],
+			"the second row was selected",
+		);
+		assert.ok(render(open).includes("arrived later"), "the reopened list has the new mail");
+		await open.press("\r");
+		assert.ok(render(open).includes(`Id ${idOf("second")}`), "the cancelled item is still selected");
+		await open.press("\x1b");
+	} finally {
+		await open.press("\x1b");
+		await closed;
+		await Promise.all([me.shutdown(), peer.shutdown()]);
+	}
+});
+
+test("d does nothing on unread mail and the hint stops offering it", async () => {
+	const me = session(newId(), { name: "me" });
+	const peer = session(newId(), { name: "peer" });
+	await Promise.all([me.start(), peer.start()]);
+	await readMessage(me, peer, "read already");
+	me.drop(true);
+	await peer.toolCall("session_mail_send", { to: me.id, message: "not read yet" });
+	await until(() => me.status() === "📬 1 unread", "the unread message");
+	const hint = (dialog: Session["dialogs"][number]): string =>
+		dialog.component.render(100).find((line) => line.includes("s filter")) ?? "";
+	const { dialog, closed } = await openPicker(me);
+	try {
+		assert.ok(render(dialog).includes("· unread"));
+		assert.ok(!hint(dialog).includes("d delete"), "the unread row is not offered d");
+		await dialog.press("d");
+		assert.equal(me.confirms.length, 0, "no confirmation was asked");
+		assert.equal(dialog.result(), undefined, "the picker did not resolve");
+		assert.equal(me.status(), "📬 1 unread", "the mail is still on disk");
+		// The all view mixes statuses, so the hint follows the selected row, not the filter.
+		for (let i = 0; i < 4; i++) await dialog.press("s");
+		assert.ok(render(dialog).includes("· all"));
+		assert.ok(!hint(dialog).includes("d delete"), "the unread row is selected first");
+		await dialog.press("\x1b[B");
+		assert.ok(hint(dialog).includes("d delete"), "the read row is offered d");
+		await dialog.press("\x1b[A");
+		assert.ok(!hint(dialog).includes("d delete"), "back on the unread row");
+	} finally {
+		await dialog.press("\x1b");
+		await closed;
+		await Promise.all([me.shutdown(), peer.shutdown()]);
+	}
+});
+
+test("d drops an awaiting request after a confirm", async () => {
+	const me = session(newId(), { name: "me" });
+	const peer = session(newId(), { name: "peer" });
+	await Promise.all([me.start(), peer.start()]);
+	me.request(peer.id, "never answered");
+	await until(() => peer.sent.length === 1, "the request to arrive");
+	const { dialog, closed } = await openPicker(me);
+	let open = dialog;
+	try {
+		assert.ok(render(dialog).includes("· all"), "nothing is unread, so the picker opens on all");
+		assert.match(shown(dialog, "never answered"), /awaiting/);
+		open = await deleteSelected(me, dialog, true);
+		assert.deepEqual(
+			me.confirms.map((confirm) => confirm.message),
+			["never answered"],
+		);
+		assert.deepEqual(envelopes(me.id, "sent"), [], "the sent copy is gone");
+		for (let i = 0; i < 2; i++) await open.press("s");
+		assert.ok(render(open).includes("Nothing is waiting for a reply"), render(open));
+	} finally {
+		await open.press("\x1b");
+		await closed;
+		await Promise.all([me.shutdown(), peer.shutdown()]);
+	}
+});
+
+test("deleting a read reply also deletes the sent copy of the request it answered", async () => {
+	const me = session(newId(), { name: "me" });
+	const peer = session(newId(), { name: "peer" });
+	await Promise.all([me.start(), peer.start()]);
+	me.request(peer.id, "the question");
+	await until(() => peer.sent.length === 1, "the request to arrive");
+	await peer.answer("the answer");
+	await until(() => me.sent.length === 1, "the reply to arrive");
+	assert.equal(envelopes(me.id, "sent").length, 1);
+	const { dialog, closed } = await openPicker(me);
+	let open = dialog;
+	try {
+		assert.match(shown(dialog, "the answer"), /read/);
+		open = await deleteSelected(me, dialog, true);
+		assert.deepEqual(
+			me.confirms.map((confirm) => confirm.message),
+			["the answer"],
+		);
+		assert.deepEqual(envelopes(me.id, "cur"), [], "the reply is gone");
+		assert.deepEqual(envelopes(me.id, "sent"), [], "the answered request's copy went with it");
+		for (let i = 0; i < 2; i++) await open.press("s");
+		assert.ok(render(open).includes("Nothing is waiting for a reply"), render(open));
+	} finally {
+		await open.press("\x1b");
+		await closed;
+		await Promise.all([me.shutdown(), peer.shutdown()]);
+	}
+});
+
+test("d deletes a sent message and an answered request", async () => {
+	const me = session(newId(), { name: "me" });
+	const peer = session(newId(), { name: "peer" });
+	await Promise.all([me.start(), peer.start()]);
+	await me.toolCall("session_mail_send", { to: peer.id, message: "a message" });
+	me.request(peer.id, "the request");
+	await until(() => peer.sent.length === 2, "the request to arrive");
+	await peer.answer("the answer");
+	await until(() => me.sent.length === 1, "the reply to arrive");
+	assert.equal(envelopes(me.id, "sent").length, 2, "sent/ holds the message and the request");
+	const { dialog, closed } = await openPicker(me);
+	let open = dialog;
+	try {
+		for (let i = 0; i < 4; i++) await open.press("s");
+		assert.ok(render(open).includes("· sent"));
+		assert.match(shown(open, "the request"), /answered/);
+		assert.match(shown(open, "a message"), /message/);
+		open = await deleteSelected(me, open, true);
+		assert.deepEqual(
+			me.confirms.map((confirm) => confirm.message),
+			["the request"],
+		);
+		assert.deepEqual(
+			envelopes(me.id, "sent").map((envelope) => envelope.body),
+			["a message"],
+		);
+		assert.equal(envelopes(me.id, "cur").length, 1, "the reply that answered it stays");
+		open = await deleteSelected(me, open, true);
+		assert.deepEqual(
+			me.confirms.map((confirm) => confirm.message),
+			["the request", "a message"],
+		);
+		assert.deepEqual(envelopes(me.id, "sent"), []);
+		assert.ok(render(open).includes("Nothing sent"), render(open));
+	} finally {
+		await open.press("\x1b");
+		await closed;
+		await Promise.all([me.shutdown(), peer.shutdown()]);
+	}
+});
+
+test("a reply to a dropped request is still delivered, quoting the id alone", async () => {
+	const me = session(newId(), { name: "me" });
+	const peer = session(newId(), { name: "peer" });
+	await Promise.all([me.start(), peer.start()]);
+	me.request(peer.id, "drop me");
+	await until(() => peer.sent.length === 1, "the request to arrive");
+	const [request] = envelopes(me.id, "sent");
+	const { dialog, closed } = await openPicker(me);
+	let open = dialog;
+	try {
+		for (let i = 0; i < 2; i++) await open.press("s");
+		assert.ok(render(open).includes("· awaiting"));
+		assert.ok(render(open).includes("drop me"));
+		open = await deleteSelected(me, open, true);
+		assert.deepEqual(envelopes(me.id, "sent"), [], "the sent copy is gone");
+		// The peer still owes the request, and its answer comes back after the copy is gone.
+		await peer.answer("after the drop");
+		await until(() => me.sent.some((sent) => sent.message.content.includes("after the drop")), "the late reply");
+		const text = me.sent.find((sent) => sent.message.content.includes("after the drop"))?.message.content ?? "";
+		assert.ok(text.includes(`Your request ${request.id} has no copy in sent/; only its id is known.`), text);
+	} finally {
+		await open.press("\x1b");
+		await closed;
+		await Promise.all([me.shutdown(), peer.shutdown()]);
+	}
+});
+
+// The picker refuses `d` on unread mail, so the store's guard is called directly:
+// it is the acceptance test that a file in `new/` is refused and left in place.
+test("the delete function refuses a file in new/ and leaves it in place", () => {
+	const address = newId();
+	mkdirSync(box(address, "new"), { recursive: true, mode: 0o700 });
+	const path = join(box(address, "new"), "000000000000001-waiting.json");
+	writeFileSync(
+		path,
+		JSON.stringify({
+			id: "waiting",
+			from: "peer",
+			to: address,
+			kind: "message",
+			hops: 0,
+			in_reply_to: [],
+			status: "",
+			ts: new Date().toISOString(),
+			body: "unread",
+		}),
+	);
+	assert.throws(() => deleteMail(address, path), /outside cur\/ or sent\//);
+	assert.ok(existsSync(path), "the refused file is still there");
+	assert.equal(files(address, "new").length, 1);
 });

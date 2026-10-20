@@ -15,6 +15,13 @@ follows [Semantic Versioning](https://semver.org/).
   running or closed marker on awaiting rows. Enter opens the whole mail and Esc
   goes back, then closes. It opens on unread when there is unread mail, and
   showing mail never marks it read.
+- In the `/mailbox` picker, `d` deletes the selected read or sent item, or
+  drops a request still awaiting a reply, after a confirmation showing its
+  first line. Deleting a read reply also deletes the `sent/` copies of the
+  requests it answered, so they do not reappear as awaiting. The picker reopens
+  on the same filter with the next row selected, or the same row when the
+  confirmation was cancelled. Unread mail cannot be deleted, and the hint line
+  leaves `d` out there.
 - `/mailbox:send` lists the other running sessions, asks for the text and
   sends it as a message, which expects no answer.
 - `/mailbox:prune` removes closed sessions' mailbox folders without the age

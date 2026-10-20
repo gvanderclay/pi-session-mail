@@ -2,8 +2,9 @@
 // key cycles, and a detail screen for the selected item. It reads no files,
 // running records or clock and imports none of them: the command handler
 // passes the items, a lookup from address to label and running state, the
-// current time, the title and the starting view. It resolves when it closes,
-// and the handler runs any action after that.
+// current time, the title and the starting view. It resolves on Esc, or on `d`
+// with the selected item for the handler to delete after a confirmation; the
+// handler reopens it where the user was.
 
 import { DynamicBorder, type Theme } from "@earendil-works/pi-coding-agent";
 import {
@@ -69,8 +70,20 @@ export type PickerOptions = {
 	selectedIndex?: number;
 };
 
-/** What the picker resolved: it closed. */
-export type PickResult = { action: "close" };
+/** What the picker resolved: it closed, or the user chose to delete the selected item. */
+export type PickResult =
+	| { action: "close" }
+	| {
+			action: "delete";
+			/** The selected item's id and box, so the handler finds its file. */
+			id: string;
+			box: PickerItem["box"];
+			/** The first line of its body, for the confirmation. */
+			firstLine: string;
+			/** Where the list was, so the handler reopens it where the user was. */
+			filter: PickerFilter;
+			index: number;
+	  };
 
 function listTheme(theme: Theme): SelectListTheme {
 	return {
@@ -119,6 +132,9 @@ function shows(filter: PickerFilter, status: Status): boolean {
 	return status === filter;
 }
 
+/** `d` deletes read and sent mail; unread mail is refused, since deleting its file would not take it back from the model. */
+const deletable = (item: PickerItem): boolean => item.box !== "new" && item.status !== "unread";
+
 const newestFirst = (a: PickerItem, b: PickerItem): number => b.ts.localeCompare(a.ts) || a.id.localeCompare(b.id);
 
 /** A peer from the snapshot; an address the handler did not resolve is named by its short id. */
@@ -163,15 +179,8 @@ export function picker(options: PickerOptions) {
 		let list: SelectList;
 
 		const build = (selectedId: string | undefined, selectedIndex: number): void => {
-			shown = options.items.filter((item) => shows(filter, item.status)).sort(newestFirst);
-			list = new SelectList(
-				shown.map((item) => row(item, options.peers, options.now, filter)),
-				ROW_MAX,
-				listTheme(theme),
-				ROW_LAYOUT,
-			);
-			const found = selectedId === undefined ? -1 : shown.findIndex((item) => item.id === selectedId);
-			list.setSelectedIndex(found >= 0 ? found : Math.max(0, selectedIndex));
+			shown = rowsFor(options.items, filter);
+			list = buildList(options, theme, filter, shown, selectedId, selectedIndex);
 			list.onSelect = (item: SelectItem): void => {
 				detailItem = shown.find((candidate) => candidate.id === item.value);
 				if (detailItem !== undefined) screen = "detail";
@@ -180,19 +189,31 @@ export function picker(options: PickerOptions) {
 		};
 		build(options.selectedId, options.selectedIndex ?? 0);
 
-		const listLines = (width: number): string[] =>
-			shown.length > 0 ? list.render(width) : new Text(theme.fg("muted", `  ${EMPTY[filter]}`), 0, 0).render(width);
+		const handleListInput = (data: string): void => {
+			if (data === "s") {
+				filter = FILTERS[(FILTERS.indexOf(filter) + 1) % FILTERS.length];
+				build(undefined, 0);
+				return;
+			}
+			const result = data === "d" ? deletion(shown, list, filter) : undefined;
+			if (result !== undefined) done(result);
+			else if (data !== "d") list.handleInput(data);
+		};
 
 		return {
 			render(width: number): string[] {
 				const title = oneLine(`${options.title} · ${filter}`);
-				const hint = screen === "detail" ? "esc back" : "s filter · enter open · esc close";
+				// The all and sent views mix statuses, so the hint follows the selected row, not the filter.
+				const selected = shown.find((item) => item.id === list.getSelectedItem()?.value);
+				const deletableNow = selected !== undefined && deletable(selected);
+				const hint =
+					screen === "detail" ? "esc back" : `s filter · enter open${deletableNow ? " · d delete" : ""} · esc close`;
 				return [
 					...border.render(width),
 					...new Text(theme.fg("accent", theme.bold(title)), 0, 0).render(width),
 					...(screen === "detail" && detailItem !== undefined
 						? new Text(detailText(detailItem, options.peers), 0, 0).render(width)
-						: listLines(width)),
+						: listLines(width, shown, list, filter, theme)),
 					...new Text(theme.fg("dim", hint), 0, 0).render(width),
 					...border.render(width),
 				];
@@ -203,12 +224,52 @@ export function picker(options: PickerOptions) {
 			handleInput(data: string): void {
 				if (screen === "detail") {
 					if (matchesKey(data, "escape")) screen = "list";
-				} else if (data === "s") {
-					filter = FILTERS[(FILTERS.indexOf(filter) + 1) % FILTERS.length];
-					build(undefined, 0);
-				} else list.handleInput(data);
+				} else handleListInput(data);
 				tui.requestRender();
 			},
 		};
 	};
+}
+
+/** The items `filter` shows, newest first. */
+const rowsFor = (items: readonly PickerItem[], filter: PickerFilter): PickerItem[] =>
+	items.filter((item) => shows(filter, item.status)).sort(newestFirst);
+
+/** A list of `items`, with the selection restored by id when it is there and by index otherwise. */
+function buildList(
+	options: PickerOptions,
+	theme: Theme,
+	filter: PickerFilter,
+	items: PickerItem[],
+	selectedId: string | undefined,
+	selectedIndex: number,
+): SelectList {
+	const list = new SelectList(
+		items.map((item) => row(item, options.peers, options.now, filter)),
+		ROW_MAX,
+		listTheme(theme),
+		ROW_LAYOUT,
+	);
+	const found = selectedId === undefined ? -1 : items.findIndex((item) => item.id === selectedId);
+	list.setSelectedIndex(found >= 0 ? found : Math.max(0, selectedIndex));
+	return list;
+}
+
+/** The list, or the note that the filter is empty. */
+function listLines(
+	width: number,
+	shown: readonly PickerItem[],
+	list: SelectList,
+	filter: PickerFilter,
+	theme: Theme,
+): string[] {
+	return shown.length > 0 ? list.render(width) : new Text(theme.fg("muted", `  ${EMPTY[filter]}`), 0, 0).render(width);
+}
+
+/** What `d` resolves with: the selected item when it may be deleted, otherwise undefined. */
+function deletion(shown: readonly PickerItem[], list: SelectList, filter: PickerFilter): PickResult | undefined {
+	const index = shown.findIndex((item) => item.id === list.getSelectedItem()?.value);
+	const item = shown[index];
+	if (item === undefined || !deletable(item)) return undefined;
+	return { action: "delete", id: item.id, box: item.box, firstLine: firstLine(item.body), filter, index };
 }

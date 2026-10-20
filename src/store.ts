@@ -8,7 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 import { type MailFile, mailStatus } from "./mail-status.ts";
 
@@ -237,6 +237,22 @@ export function findSent(address: string, ids: readonly string[]): Map<string, S
 		}
 	}
 	return found;
+}
+
+/**
+ * Delete one mail file from this session's `cur/` or `sent/`, refusing any path
+ * outside those two boxes so a file still in `new/` cannot be taken from the
+ * model. A `cur/` envelope that answers requests (`in_reply_to`) also loses
+ * this session's `sent/` copies of them, so they do not reappear as awaiting.
+ */
+export function deleteMail(address: string, path: string): void {
+	const parent = dirname(path);
+	const cur = boxPath(address, "cur");
+	if (parent !== cur && parent !== boxPath(address, "sent"))
+		throw new Error(`refusing to delete mail outside cur/ or sent/: ${JSON.stringify(path)}`);
+	if (parent === cur)
+		for (const copy of findSent(address, readEnvelope(path).in_reply_to).values()) rmSync(copy.path, { force: true });
+	rmSync(path, { force: true });
 }
 
 /** Every regular `.json` file in `box`, with its path, its parsed JSON and the envelope when valid. */

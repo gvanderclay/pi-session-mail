@@ -41,8 +41,13 @@ sent), the kind and how long ago it was sent; the all and sent views also show
 its status, and an awaiting row says whether its target is still running or
 has closed. Enter opens the whole mail: the other session's name and full
 address, the kind, the id, the absolute time, what it answers and the full
-text. Esc goes back to the list, and Esc there closes the picker. Showing mail
-never marks it read, so the footer's count stays until the model sees it.
+text. Esc goes back to the list, and Esc there closes the picker. `d` deletes
+the selected read or sent item, or drops a request still awaiting a reply,
+after a confirmation showing its first line; deleting a read reply also deletes
+the `sent/` copies of the requests it answered. The picker reopens on the same
+filter with the row that took the deleted one's place selected. `d` is left out
+on unread mail. Showing mail never marks it read, so the footer's count stays
+until the model sees it.
 
 The session's id is its address. Other sessions see its Pi session name (set it
 with `/name`), or the first 8 characters of its id when it has none.
