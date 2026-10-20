@@ -90,6 +90,21 @@ test("/mailbox:send offers every other running session and writes a message with
 		await Promise.all([a.shutdown(), b.shutdown(), c.shutdown()]);
 	}));
 
+test("/mailbox:send tells apart two sessions with the same name in the same folder", () =>
+	withFreshState(async () => {
+		const a = session(newId(), { name: "alpha", cwd: "/work/a" });
+		const b = session(newId(), { name: "twin", cwd: "/work/t" });
+		const c = session(newId(), { name: "twin", cwd: "/work/t" });
+		await Promise.all([a.start(), b.start(), c.start()]);
+		a.answers.select.push(`twin (/work/t) ${c.id}`);
+		a.answers.input.push("hi");
+		await a.command("mailbox:send");
+		assert.deepEqual([...a.selects[0].options].sort(), [`twin (/work/t) ${b.id}`, `twin (/work/t) ${c.id}`].sort());
+		assert.deepEqual(envelopes(b.id, "new"), []);
+		assert.equal(envelopes(c.id, "new").length, 1);
+		await Promise.all([a.shutdown(), b.shutdown(), c.shutdown()]);
+	}));
+
 test("/mailbox:send sends nothing when the select or input is cancelled or the text is empty", () =>
 	withFreshState(async () => {
 		const a = session(newId(), { name: "alpha", cwd: "/work/a" });

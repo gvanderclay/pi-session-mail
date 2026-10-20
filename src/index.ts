@@ -635,7 +635,13 @@ export default function mailbox(pi: ExtensionAPI) {
 				context.ui.notify("No other session is running", "info");
 				return;
 			}
-			const options = running.map((record) => `${label(record)} (${record.cwd})`);
+			const base = (record: RunningRecord) => `${label(record)} (${record.cwd})`;
+			// `select` returns the option text, so two same-named sessions in one folder need the full id to tell them apart.
+			const options = running.map((record) =>
+				running.some((other) => other !== record && base(other) === base(record))
+					? `${base(record)} ${record.address}`
+					: base(record),
+			);
 			const picked = await context.ui.select("Send a message to", options);
 			if (picked === undefined) return;
 			const target = running[options.indexOf(picked)];
