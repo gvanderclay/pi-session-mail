@@ -7,11 +7,11 @@
 // Each running session also announces its name, working directory and idle or
 // busy state in `<mail root>/running/<address>.json` (`running.ts`), which
 // `session_mail_list` reports (`tools.ts`) and which lets a `to` name a
-// session by its Pi session name or short id. `/mailbox` shows the address and
-// name, `/mailbox:send` sends a message and `/mailbox:prune` removes closed
-// sessions' folders; `session_mail_send` sends a message, which expects no
-// answer. Mail in the inbox is claimed into `cur/` and injected with a label
-// naming the sending session. Requests and messages
+// session by its Pi session name or short id. `/mailbox` opens a picker of
+// this session's mail, `/mailbox:send` sends a message and `/mailbox:prune`
+// removes closed sessions' folders; `session_mail_send` sends a message, which
+// expects no answer. Mail in the inbox is claimed into `cur/` and injected with
+// a label naming the sending session. Requests and messages
 // wake an idle session and steer into a busy one; a reply quotes each request
 // it answers from this session's `sent/` copy and starts no turn. When the recipient settles, its
 // last answer goes back to each sender as one reply — `done` normally, or
@@ -28,6 +28,8 @@ import { type FSWatcher, statSync, watch } from "node:fs";
 import { dirname } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { mailStatus } from "./mail-status.ts";
+import { type Peer, type PickerItem, type PickResult, picker } from "./picker.ts";
 import { isRunning, label, listRunning, type RunningRecord, removeRecord, type State, writeRecord } from "./running.ts";
 import { type SettleInput, settle } from "./settle.ts";
 import {
@@ -36,10 +38,12 @@ import {
 	type Envelope,
 	ensureBoxes,
 	findSent,
+	type InboxFile,
 	isAddress,
 	listNew,
 	pruneClosed,
 	readEnvelope,
+	readMailbox,
 	type SentCopy,
 	send,
 } from "./store.ts";
@@ -290,6 +294,49 @@ export default function mailbox(pi: ExtensionAPI) {
 		if (!ctx?.hasUI || address === undefined) return;
 		const count = listNew(address).length + unread.size;
 		ctx.ui.setStatus(STATUS_KEY, count > 0 ? `📬 ${count} unread` : undefined);
+	}
+
+	/**
+	 * Open the picker on this session's mail. It opens on unread when anything is
+	 * unread, otherwise on all; it changes nothing on disk and never touches the
+	 * unread set, so the footer keeps saying the model has not seen that mail yet.
+	 */
+	async function openMailbox(me: string, context: ExtensionContext) {
+		let files: InboxFile[];
+		let records: RunningRecord[];
+		try {
+			files = readMailbox(me);
+			records = listRunning();
+		} catch (err) {
+			context.ui.notify(`mailbox: ${(err as Error).message}`, "error");
+			return;
+		}
+		const items: PickerItem[] = [];
+		for (const file of mailStatus(files, unread)) {
+			const envelope = file.envelope;
+			if (envelope === undefined || file.status === undefined) continue;
+			items.push({
+				id: envelope.id,
+				box: file.box,
+				from: envelope.from,
+				to: envelope.to,
+				kind: envelope.kind,
+				inReplyTo: envelope.in_reply_to,
+				ts: envelope.ts,
+				body: envelope.body,
+				status: file.status,
+			});
+		}
+		const labels = new Map(records.map((record) => [record.address, label(record)]));
+		const peer = (target: string): Peer => ({
+			label: labels.get(target) ?? label({ address: target }),
+			running: isRunning(target),
+		});
+		const current = context.sessionManager.getSessionName?.() || undefined;
+		const short = me.slice(0, 8);
+		const title = `Mailbox · ${current === undefined ? short : `${current} · ${short}`}`;
+		const filter = items.some((item) => item.status === "unread") ? "unread" : "all";
+		await context.ui.custom<PickResult>(picker({ items, peer, title, now: Date.now(), filter }));
 	}
 
 	/** A first scan deferred to the next event-loop turn; see `session_start`. */
@@ -593,7 +640,7 @@ export default function mailbox(pi: ExtensionAPI) {
 
 	pi.registerCommand("mailbox", {
 		description:
-			"Show this session's mailbox address and name; send a message to another running session with /mailbox:send; remove closed sessions' mailbox folders with /mailbox:prune",
+			"Open this session's mail: s changes the filter, enter opens an item, esc closes. Send a message with /mailbox:send; remove closed sessions' folders with /mailbox:prune",
 		handler: async (args, context) => {
 			const me = address;
 			if (me === undefined) {
@@ -607,11 +654,7 @@ export default function mailbox(pi: ExtensionAPI) {
 				);
 				return;
 			}
-			const current = context.sessionManager.getSessionName?.() || undefined;
-			context.ui.notify(
-				`Mailbox address: ${me}\nName: ${current === undefined ? `none; other sessions see ${label({ address: me })} (set one with /name)` : current}`,
-				"info",
-			);
+			await openMailbox(me, context);
 		},
 	});
 

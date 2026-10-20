@@ -223,16 +223,23 @@ test("with no records the list says no session is running", async () => {
 // ---------------------------------------------------------------------------
 // Addressing
 
-test("/mailbox with no arguments shows the address and the name, or the short id others see", async () => {
+test("/mailbox opens the picker titled with the name and short id, or the short id alone", async () => {
 	const a = session(newId(), { name: "planner" });
-	await a.mailbox("");
-	assert.equal(a.notes.at(-1), `Mailbox address: ${a.id}\nName: planner`);
+	const opened = a.mailbox("");
+	await until(() => a.dialogs.length === 1, "the picker to open");
+	const title = a.dialogs[0].component.render(80).join("\n");
+	assert.ok(title.includes(`Mailbox · planner · ${a.id.slice(0, 8)} · all`), title);
+	await a.dialogs[0].press("\x1b");
+	await opened;
+
 	const b = session(newId());
-	await b.mailbox("");
-	assert.equal(
-		b.notes.at(-1),
-		`Mailbox address: ${b.id}\nName: none; other sessions see ${b.id.slice(0, 8)} (set one with /name)`,
-	);
+	const other = b.mailbox("");
+	await until(() => b.dialogs.length === 1, "the second picker to open");
+	const short = b.dialogs[0].component.render(80).join("\n");
+	assert.ok(short.includes(`Mailbox · ${b.id.slice(0, 8)} · all`), short);
+	await b.dialogs[0].press("\x1b");
+	await other;
+	await Promise.all([a.shutdown(), b.shutdown()]);
 });
 
 // ---------------------------------------------------------------------------

@@ -10,6 +10,8 @@ import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync,
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
+import { type MailFile, mailStatus } from "./mail-status.ts";
+
 /** What an envelope is: answered at settle, waited on, plain, or an answer. */
 export type Kind = "request" | "ask" | "message" | "reply";
 const KINDS: readonly Kind[] = ["request", "ask", "message", "reply"];
@@ -226,31 +228,46 @@ export function findSent(address: string, ids: readonly string[]): Map<string, S
 	return found;
 }
 
-function envelopesIn(address: string, box: Box): Partial<Envelope>[] {
+/** Every regular `.json` file in `box`, with its path and the envelope it holds; absent when it cannot be read. */
+function envelopesIn(address: string, box: Box): { path: string; envelope?: Envelope }[] {
 	const dir = boxPath(address, box);
-	const out: Partial<Envelope>[] = [];
+	const out: { path: string; envelope?: Envelope }[] = [];
 	for (const name of jsonFiles(address, box)) {
+		const path = join(dir, name);
+		let envelope: Envelope | undefined;
 		try {
-			out.push(JSON.parse(readFileSync(join(dir, name), "utf8")));
+			envelope = readEnvelope(path);
 		} catch {
-			out.push({});
+			envelope = undefined;
 		}
+		out.push({ path, envelope });
 	}
 	return out;
 }
 
+/** One file in a session's mailbox: its box, its path, and the envelope it holds when readable. */
+export type InboxFile = MailFile<Envelope> & { path: string };
+
+/** Every regular file in this session's `new/`, `cur/` and `sent/`, each with its box and path. */
+export function readMailbox(address: string): InboxFile[] {
+	const out: InboxFile[] = [];
+	for (const box of ["new", "cur", "sent"] as const)
+		for (const file of envelopesIn(address, box)) out.push({ box, ...file });
+	return out;
+}
+
 /**
- * Counts derived from disk: files still in `new/`, envelopes in `cur/`, and
- * requests (not messages) in `sent/` that no envelope in `cur/` answers.
+ * Counts derived from disk: files still in `new/`, files in `cur/`, and
+ * requests (not messages) in `sent/` that no readable envelope in `cur/` answers.
  */
 export function diskCounts(address: string): { unclaimed: number; read: number; awaiting: number } {
-	const cur = envelopesIn(address, "cur");
-	const answered = new Set(cur.flatMap((e) => (Array.isArray(e.in_reply_to) ? e.in_reply_to : [])));
-	// A message expects no answer, so it never counts as awaiting one.
-	const awaiting = envelopesIn(address, "sent").filter(
-		(e) => typeof e.id === "string" && e.kind !== "message" && !answered.has(e.id),
-	).length;
-	return { unclaimed: listNew(address).length, read: cur.length, awaiting };
+	const files = readMailbox(address);
+	const statuses = mailStatus(files, new Set());
+	return {
+		unclaimed: files.filter((file) => file.box === "new").length,
+		read: files.filter((file) => file.box === "cur").length,
+		awaiting: statuses.filter((file) => file.status === "awaiting").length,
+	};
 }
 
 // ---------------------------------------------------------------------------

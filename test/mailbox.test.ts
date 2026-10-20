@@ -33,11 +33,15 @@ const root = stateRoot();
 // ---------------------------------------------------------------------------
 // Addressing and sending
 
-test("/mailbox with no arguments shows the session's address", async () => {
-	const a = session(newId("a"));
-	await a.mailbox("");
-	assert.equal(a.notes.length, 1);
-	assert.match(a.notes[0], new RegExp(a.id));
+test("/mailbox opens the picker titled with the session's name and short address", async () => {
+	const a = session(newId(), { name: "planner" });
+	const opened = a.mailbox("");
+	await until(() => a.dialogs.length === 1, "the picker to open");
+	const lines = a.dialogs[0].component.render(80).join("\n");
+	assert.ok(lines.includes(`Mailbox · planner · ${a.id.slice(0, 8)} · all`), lines);
+	await a.dialogs[0].press("\x1b");
+	await opened;
+	await a.shutdown();
 });
 
 test("/mailbox, /mailbox:send and /mailbox:prune refuse while the mailbox is off", async () => {
