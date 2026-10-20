@@ -4,7 +4,7 @@
 // mail folders, so every test builds its own sessions and mail.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -598,6 +598,82 @@ test("a reply to a dropped request is still delivered, quoting the id alone", as
 		await closed;
 		await Promise.all([me.shutdown(), peer.shutdown()]);
 	}
+});
+
+test("a symlinked cur/ pointing at another session's new/ deletes nothing there and notifies", async () => {
+	const me = session(newId(), { name: "me" });
+	const other = newId();
+	await me.start();
+	// Another session's unread folder, wearing this session's cur/ as a link to it.
+	mkdirSync(box(other, "new"), { recursive: true, mode: 0o700 });
+	const foreign = join(box(other, "new"), "000000000000001-foreign.json");
+	writeFileSync(
+		foreign,
+		JSON.stringify({
+			id: "foreign",
+			from: other,
+			to: other,
+			kind: "message",
+			hops: 0,
+			in_reply_to: [],
+			status: "",
+			ts: new Date().toISOString(),
+			body: "not yours",
+		}),
+	);
+	rmSync(box(me.id, "cur"), { recursive: true });
+	symlinkSync(box(other, "new"), box(me.id, "cur"));
+	const { dialog, closed } = await openPicker(me);
+	let open = dialog;
+	try {
+		assert.ok(render(dialog).includes("not yours"), "cur/ is listed through the link, as before the fix");
+		open = await deleteSelected(me, open, true);
+		assert.equal(me.confirms.length, 1, "the delete was confirmed");
+		assert.ok(existsSync(foreign), "the other folder's mail is still there");
+		assert.equal(files(other, "new").length, 1);
+		assert.match(me.errors.join("\n"), /not a real directory/);
+	} finally {
+		await open.press("\x1b");
+		await closed;
+		await me.shutdown();
+	}
+});
+
+test("an unreadable sent/ keeps a reply and its request copy and notifies", {
+	skip: process.getuid?.() === 0,
+}, async () => {
+	const me = session(newId(), { name: "me" });
+	const peer = session(newId(), { name: "peer" });
+	await Promise.all([me.start(), peer.start()]);
+	me.request(peer.id, "the question");
+	await until(() => peer.sent.length === 1, "the request to arrive");
+	await peer.answer("the answer");
+	await until(() => me.sent.length === 1, "the reply to arrive");
+	const sentBox = box(me.id, "sent");
+	const { dialog, closed } = await openPicker(me);
+	let open = dialog;
+	try {
+		assert.match(shown(dialog, "the answer"), /read/);
+		// sent/ goes unreadable while the confirmation is up.
+		chmodSync(sentBox, 0o000);
+		open = await deleteSelected(me, open, true);
+		assert.deepEqual(
+			envelopes(me.id, "cur").map((envelope) => envelope.body),
+			["the answer"],
+			"the reply stays",
+		);
+		assert.match(me.errors.join("\n"), /EACCES/);
+	} finally {
+		chmodSync(sentBox, 0o700);
+		await open.press("\x1b");
+		await closed;
+	}
+	assert.deepEqual(
+		envelopes(me.id, "sent").map((envelope) => envelope.body),
+		["the question"],
+		"the request copy stays, so it is still answered rather than awaiting",
+	);
+	await Promise.all([me.shutdown(), peer.shutdown()]);
 });
 
 // The picker refuses `d` on unread mail, so the store's guard is called directly:

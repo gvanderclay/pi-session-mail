@@ -139,6 +139,15 @@ function isFile(path: string): boolean {
 	}
 }
 
+/** A real directory: `lstat`, so a symlink to one is not. False when there is nothing there. */
+function isDirectory(path: string): boolean {
+	try {
+		return lstatSync(path).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
 /** `.json` names in `box` that are regular files, in readdir order. */
 function jsonFiles(address: string, box: Box): string[] {
 	const dir = boxPath(address, box);
@@ -240,18 +249,67 @@ export function findSent(address: string, ids: readonly string[]): Map<string, S
 }
 
 /**
+ * The same lookup as `findSent`, for deletion: an unreadable `sent/` or a
+ * matching copy that cannot be read throws, because deleting a reply whose
+ * requests stayed behind would make them reappear as awaiting. A missing
+ * `sent/` holds no copies.
+ */
+function sentCopiesForDeletion(address: string, ids: readonly string[]): Map<string, SentCopy> {
+	const found = new Map<string, SentCopy>();
+	if (ids.length === 0) return found;
+	const dir = boxPath(address, "sent");
+	let names: string[];
+	try {
+		names = readdirSync(dir);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return found;
+		throw err;
+	}
+	if (!isDirectory(dir))
+		throw new Error(`refusing to delete sent copies through ${JSON.stringify(dir)}: not a real directory`);
+	for (const name of names) {
+		const id = ids.find((candidate) => name.endsWith(`-${candidate}.json`));
+		if (id === undefined || found.has(id)) continue;
+		const path = join(dir, name);
+		if (!isFile(path)) continue;
+		const envelope = readEnvelope(path);
+		if (envelope.id === id) found.set(id, { envelope, path });
+	}
+	return found;
+}
+
+/**
  * Delete one mail file from this session's `cur/` or `sent/`, refusing any path
  * outside those two boxes so a file still in `new/` cannot be taken from the
- * model. A `cur/` envelope that answers requests (`in_reply_to`) also loses
- * this session's `sent/` copies of them, so they do not reappear as awaiting.
+ * model. The session folder and the box must be real directories, not symlinks,
+ * so the delete stays inside this mailbox however the path is spelled, and the
+ * file itself must be a regular file or a symlink, which is unlinked without
+ * its target. A `cur/` envelope that answers requests (`in_reply_to`) also
+ * loses this session's `sent/` copies of them, so they do not reappear as
+ * awaiting; a `sent/` that cannot be read throws before anything is removed.
  */
 export function deleteMail(address: string, path: string): void {
 	const parent = dirname(path);
 	const cur = boxPath(address, "cur");
 	if (parent !== cur && parent !== boxPath(address, "sent"))
 		throw new Error(`refusing to delete mail outside cur/ or sent/: ${JSON.stringify(path)}`);
-	if (parent === cur)
-		for (const copy of findSent(address, readEnvelope(path).in_reply_to).values()) rmSync(copy.path, { force: true });
+	for (const dir of [join(mailRoot(), address), parent])
+		if (!isDirectory(dir)) throw new Error(`refusing to delete through ${JSON.stringify(dir)}: not a real directory`);
+	let stats: ReturnType<typeof lstatSync>;
+	try {
+		stats = lstatSync(path);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return; // already gone
+		throw err;
+	}
+	if (!stats.isFile() && !stats.isSymbolicLink())
+		throw new Error(`refusing to delete ${JSON.stringify(path)}: not a file`);
+	// Copies first, so an unlink that throws keeps the reply the picker was on.
+	const copies =
+		parent === cur && stats.isFile()
+			? [...sentCopiesForDeletion(address, readEnvelope(path).in_reply_to).values()]
+			: [];
+	for (const copy of copies) rmSync(copy.path, { force: true });
 	rmSync(path, { force: true });
 }
 
@@ -343,14 +401,6 @@ const RUNNING = "running";
 
 /** A folder being pruned is first renamed to this, which is no address, so a send makes a fresh folder. */
 const ASIDE = /^\.pruning\.([A-Za-z0-9_-]+)\.[0-9a-f-]{36}$/;
-
-const isDirectory = (path: string): boolean => {
-	try {
-		return lstatSync(path).isDirectory();
-	} catch {
-		return false;
-	}
-};
 
 /** Names in `aside/<box>` when it is a real directory; a symlink or file there lists nothing. Undefined when it cannot be listed. */
 const boxNames = (aside: string, box: Box): string[] | undefined =>
