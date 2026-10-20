@@ -1,20 +1,19 @@
-// Loads the packed package in the `pi` on PATH and sends one message through
-// the `/mailbox` command. It needs no API key and no model: an extension
-// command runs without a model call, and Pi answers "handled".
+// Loads the packed package in the `pi` on PATH and runs one extension command.
+// It needs no API key and no model: an extension command runs without a model
+// call, and Pi answers "handled".
 //
 // Steps: `npm pack`, unpack the tarball, `pi install` the unpacked folder as a
 // local path (a .tgz is not a Pi package source), run `pi --mode rpc` with one
-// `/mailbox <uuid> <text>` prompt, then check for a `Sent` notification, a
-// "handled" response and one envelope in the recipient's `new/`.
+// `/mailbox:prune` prompt, then check for its `Removed 0 mailbox folders of
+// closed sessions` notification and a "handled" response.
 // HOME, the agent folder and XDG_STATE_HOME are fresh temporary folders, so the
 // real mail root is never touched.
 // Run from the package root: node scripts/smoke.mjs
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const RECIPIENT = "0b2f6c1e-5d3a-4f7e-9a41-7c8d2e6b1a90";
 /** How long the RPC run, and each command before it, may take. */
 const TIMEOUT_MS = 60_000;
 
@@ -99,14 +98,18 @@ child.on("close", () => {
 	closed = true;
 });
 
-const prompt = { id: "smoke-1", type: "prompt", message: `/mailbox ${RECIPIENT} smoke test` };
+const prompt = { id: "smoke-1", type: "prompt", message: "/mailbox:prune" };
 child.stdin.write(`${JSON.stringify(prompt)}\n`);
 
 const deadline = Date.now() + TIMEOUT_MS;
 const response = () => records.find((record) => record.type === "response" && record.id === prompt.id);
-const sent = () =>
-	records.find((record) => record.type === "extension_ui_request" && /^Sent /.test(record.message ?? ""));
-while (!(response() && sent()) && !closed && Date.now() < deadline) {
+const pruned = () =>
+	records.find(
+		(record) =>
+			record.type === "extension_ui_request" &&
+			record.message === "Removed 0 mailbox folders of closed sessions",
+	);
+while (!(response() && pruned()) && !closed && Date.now() < deadline) {
 	await new Promise((resolve) => setTimeout(resolve, 100));
 }
 if (!closed) {
@@ -117,19 +120,12 @@ if (!closed) {
 if (!response()) fail(`no response to the prompt (pi stderr: ${stderr.trim() || "empty"})`);
 if (!response().success) fail(`the prompt was rejected, so Pi did not run /mailbox as a command; the extension probably did not load: ${JSON.stringify(response())}`);
 if (response().data?.disposition !== "handled") fail(`expected "disposition":"handled", got ${JSON.stringify(response())}`);
-if (!sent()) {
+if (!pruned()) {
 	const notes = records.filter((record) => record.method === "notify").map((record) => record.message);
-	fail(`no "Sent" notification; the extension did not load or the command failed (notifications: ${JSON.stringify(notes)})`);
+	fail(
+		`no "Removed 0 mailbox folders of closed sessions" notification; the extension did not load or the command failed (notifications: ${JSON.stringify(notes)})`,
+	);
 }
-
-const inbox = join(stateHome, "pi-session-mail", RECIPIENT, "new");
-let envelopes;
-try {
-	envelopes = readdirSync(inbox);
-} catch {
-	envelopes = [];
-}
-if (envelopes.length !== 1) fail(`expected one envelope in ${inbox}, found ${envelopes.length}`);
 
 rmSync(root, { recursive: true, force: true });
-console.log(`smoke test passed: ${sent().message}`);
+console.log(`smoke test passed: ${pruned().message}`);

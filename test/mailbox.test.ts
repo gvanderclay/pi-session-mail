@@ -40,24 +40,104 @@ test("/mailbox with no arguments shows the session's address", async () => {
 	assert.match(a.notes[0], new RegExp(a.id));
 });
 
-test("/mailbox refuses every form while the mailbox is off", async () => {
+test("/mailbox, /mailbox:send and /mailbox:prune refuse while the mailbox is off", async () => {
 	const target = session(newId());
 	await target.start();
 	const a = session("../not-an-address");
 	await a.start();
 	assert.match(a.warnings[0], /is not a usable address; the mailbox is off$/);
-	for (const args of ["", `${target.id} hello`, "prune"]) await a.mailbox(args);
+	for (const name of ["mailbox", "mailbox:send", "mailbox:prune"]) await a.command(name);
 	assert.deepEqual(a.notes, []);
 	assert.deepEqual(a.errors, Array(3).fill("mailbox: this session has no mailbox address; the mailbox is off"));
+	assert.deepEqual(a.selects, []);
 	assert.equal(envelopes(target.id, "new").length + envelopes(target.id, "cur").length, 0);
 	await a.shutdown();
 	await target.shutdown();
 });
 
-test("/mailbox <address> <text> writes a request to the recipient's new/ and the sender's sent/", async () => {
+let sendState = 0;
+/** Run `body` with a mail root of its own, where only the sessions it starts are running. */
+async function withFreshState(body: () => Promise<void>) {
+	const saved = process.env.XDG_STATE_HOME;
+	process.env.XDG_STATE_HOME = join(dir, `send-state-${++sendState}`);
+	try {
+		await body();
+	} finally {
+		process.env.XDG_STATE_HOME = saved;
+	}
+}
+
+test("/mailbox:send offers every other running session and writes a message with hops 0", () =>
+	withFreshState(async () => {
+		const a = session(newId(), { name: "alpha", cwd: "/work/a" });
+		const b = session(newId(), { name: "bravo", cwd: "/work/b" });
+		const c = session(newId(), { name: "charlie", cwd: "/work/c" });
+		await Promise.all([a.start(), b.start(), c.start()]);
+		a.answers.select.push("bravo (/work/b)");
+		a.answers.input.push("  hello there  ");
+		await a.command("mailbox:send");
+		assert.deepEqual(a.selects, [{ title: "Send a message to", options: ["bravo (/work/b)", "charlie (/work/c)"] }]);
+		assert.deepEqual(a.inputs, [{ title: "Message", placeholder: "type a message" }]);
+		const [env] = envelopes(b.id, "new");
+		assert.equal(env.from, a.id);
+		assert.equal(env.to, b.id);
+		assert.equal(env.kind, "message");
+		assert.equal(env.hops, 0);
+		assert.equal(env.body, "hello there");
+		assert.deepEqual(envelopes(a.id, "sent"), [env]);
+		assert.deepEqual(envelopes(c.id, "new"), []);
+		assert.equal(a.notes.at(-1), `Sent ${env.id} to ${b.id}`);
+		await Promise.all([a.shutdown(), b.shutdown(), c.shutdown()]);
+	}));
+
+test("/mailbox:send tells apart two sessions with the same name in the same folder", () =>
+	withFreshState(async () => {
+		const a = session(newId(), { name: "alpha", cwd: "/work/a" });
+		const b = session(newId(), { name: "twin", cwd: "/work/t" });
+		const c = session(newId(), { name: "twin", cwd: "/work/t" });
+		await Promise.all([a.start(), b.start(), c.start()]);
+		a.answers.select.push(`twin (/work/t) ${c.id}`);
+		a.answers.input.push("hi");
+		await a.command("mailbox:send");
+		assert.deepEqual([...a.selects[0].options].sort(), [`twin (/work/t) ${b.id}`, `twin (/work/t) ${c.id}`].sort());
+		assert.deepEqual(envelopes(b.id, "new"), []);
+		assert.equal(envelopes(c.id, "new").length, 1);
+		await Promise.all([a.shutdown(), b.shutdown(), c.shutdown()]);
+	}));
+
+test("/mailbox:send sends nothing when the select or input is cancelled or the text is empty", () =>
+	withFreshState(async () => {
+		const a = session(newId(), { name: "alpha", cwd: "/work/a" });
+		const b = session(newId(), { name: "bravo", cwd: "/work/b" });
+		await Promise.all([a.start(), b.start()]);
+		await a.command("mailbox:send");
+		for (const text of [undefined, "   "]) {
+			a.answers.select.push("bravo (/work/b)");
+			a.answers.input.push(text);
+			await a.command("mailbox:send");
+		}
+		assert.deepEqual(a.notes, []);
+		assert.deepEqual(a.errors, []);
+		assert.equal(a.inputs.length, 2);
+		assert.deepEqual(envelopes(b.id, "new"), []);
+		assert.deepEqual(files(a.id, "sent"), []);
+		await Promise.all([a.shutdown(), b.shutdown()]);
+	}));
+
+test("/mailbox:send says when no other session is running", () =>
+	withFreshState(async () => {
+		const a = session(newId(), { name: "alpha", cwd: "/work/a" });
+		await a.start();
+		await a.command("mailbox:send");
+		assert.deepEqual(a.notes, ["No other session is running"]);
+		assert.deepEqual(a.selects, []);
+		await a.shutdown();
+	}));
+
+test("a request writes to the recipient's new/ and the sender's sent/", async () => {
 	const a = session(newId("a"));
 	const b = newId("b");
-	await a.mailbox(`${b}   hello there `);
+	await a.request(b, "  hello there ");
 	assert.equal(files(b, "new").length, 1);
 	assert.deepEqual(files(b, "tmp"), []);
 	assert.equal(files(a.id, "sent").length, 1);
@@ -79,7 +159,7 @@ test("/mailbox <address> <text> writes a request to the recipient's new/ and the
 test("mail lands under $XDG_STATE_HOME/pi-session-mail/<address>/, a root created owner-only, and nothing under the agent dir", async () => {
 	const a = session(newId("a"));
 	const b = newId("b");
-	await a.mailbox(`${b} hello`);
+	await a.request(b, "hello");
 	assert.equal(readdirSync(join(dir, "state", "pi-session-mail", b, "new")).length, 1);
 	assert.equal(statSync(root).mode & 0o777, 0o700);
 	for (const sub of ["tmp", "new", "cur", "sent"]) assert.equal(statSync(box(b, sub as "new")).mode & 0o777, 0o700);
@@ -91,7 +171,7 @@ test("a delivered envelope and its sent/ copy are owner-only (0600) even under u
 	const b = newId("b");
 	const saved = process.umask(0o022);
 	try {
-		await a.mailbox(`${b} private`);
+		await a.request(b, "private");
 	} finally {
 		process.umask(saved);
 	}
@@ -160,13 +240,13 @@ test("the root is read at call time and ignores a relative XDG_STATE_HOME", asyn
 		process.env.XDG_STATE_HOME = other;
 		const a = session(newId("a"));
 		const b = newId("b");
-		await a.mailbox(`${b} moved`);
+		await a.request(b, "moved");
 		assert.equal(readdirSync(join(other, "pi-session-mail", b, "new")).length, 1);
 
 		process.env.XDG_STATE_HOME = "relative/state";
 		process.env.HOME = fakeHome;
 		const c = newId("c");
-		await a.mailbox(`${c} fallback`);
+		await a.request(c, "fallback");
 		assert.equal(readdirSync(join(fakeHome, ".local", "state", "pi-session-mail", c, "new")).length, 1);
 		assert.ok(!existsSync(join("relative", "state")));
 	} finally {
@@ -178,21 +258,11 @@ test("the root is read at call time and ignores a relative XDG_STATE_HOME", asyn
 test("file names sort in send order", async () => {
 	const a = session(newId("a"));
 	const b = newId("b");
-	for (const n of ["one", "two", "three", "four", "five"]) await a.mailbox(`${b} ${n}`);
+	for (const n of ["one", "two", "three", "four", "five"]) await a.request(b, n);
 	assert.deepEqual(
 		envelopes(b, "new").map((e) => e.body),
 		["one", "two", "three", "four", "five"],
 	);
-});
-
-test("an invalid address is rejected before any path is built", async () => {
-	const a = session(newId("a"));
-	for (const bad of ["../evil hi", "a/b hi", ". hi", "x.y hi", "evil"]) await a.mailbox(bad);
-	assert.equal(a.errors.length, 5);
-	assert.ok(!existsSync(join(dir, "agent", "evil")));
-	assert.ok(!existsSync(join(root, "a")));
-	assert.ok(!existsSync(join(root, "x.y")));
-	assert.deepEqual(files(a.id, "sent"), []);
 });
 
 // ---------------------------------------------------------------------------
@@ -204,7 +274,7 @@ test("a running session claims a message into cur/ and injects it once as labell
 	await a.start();
 	await b.start();
 	try {
-		await a.mailbox(`${b.id} what is 2 + 2?`);
+		await a.request(b.id, "what is 2 + 2?");
 		await until(() => b.sent.length === 1, "B to receive");
 		const [{ message, options }] = b.sent;
 		assert.deepEqual(options, { triggerTurn: true, deliverAs: "steer" });
@@ -230,7 +300,7 @@ test("a running session claims a message into cur/ and injects it once as labell
 test("messages are delivered in send order", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	for (const n of ["first", "second", "third"]) await a.mailbox(`${b.id} ${n}`);
+	for (const n of ["first", "second", "third"]) await a.request(b.id, n);
 	await b.start();
 	await b.shutdown();
 	assert.deepEqual(
@@ -242,7 +312,7 @@ test("messages are delivered in send order", async () => {
 test("mail waiting at session start is claimed after a turn, never inside session_start", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} waiting`);
+	await a.request(b.id, "waiting");
 	const seen: unknown[] = [];
 	b.events.on("message:inbound", (payload) => void seen.push(payload));
 	await b.sessionStart();
@@ -258,7 +328,7 @@ test("mail waiting at session start is claimed after a turn, never inside sessio
 test("a listener that rebuilds state in a later extension's session_start sees waiting mail", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} waiting`);
+	await a.request(b.id, "waiting");
 	let restored = false;
 	const seen: unknown[] = [];
 	// Registered after `mailbox`'s own handler, as a later extension's would be.
@@ -277,7 +347,7 @@ test("a listener that rebuilds state in a later extension's session_start sees w
 test("shutdown cancels a scan deferred to the next turn", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} too late`);
+	await a.request(b.id, "too late");
 	await b.sessionStart();
 	await b.shutdown();
 	await turn();
@@ -290,8 +360,8 @@ test("a body over 32 KiB is cut, with the envelope's cur/ path; a smaller one pa
 	const b = session(newId("b"));
 	const small = "é".repeat(100);
 	const big = `${"x".repeat(32 * 1024 - 1)}é${"y".repeat(5000)}`;
-	await a.mailbox(`${b.id} ${small}`);
-	await a.mailbox(`${b.id} ${big}`);
+	await a.request(b.id, small);
+	await a.request(b.id, big);
 	await b.start();
 	await b.shutdown();
 	assert.equal(b.sent.length, 2);
@@ -308,7 +378,7 @@ test("a body over 32 KiB is cut, with the envelope's cur/ path; a smaller one pa
 test("the same envelope id is never injected twice", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} once`);
+	await a.request(b.id, "once");
 	const [name] = files(b.id, "new");
 	const copy = readFileSync(join(box(b.id, "new"), name), "utf8");
 	await b.start();
@@ -329,7 +399,7 @@ test("a malformed envelope is set aside in cur/ with one warning and does not bl
 	);
 	writeFileSync(join(box(b.id, "new"), "000000000000003-ignored.txt"), "not an envelope");
 	mkdirSync(join(box(b.id, "new"), "000000000000004-dir.json"));
-	await a.mailbox(`${b.id} still works`);
+	await a.request(b.id, "still works");
 	await b.start();
 	await b.shutdown();
 	assert.equal(b.sent.length, 1);
@@ -343,12 +413,12 @@ test("a malformed envelope is set aside in cur/ with one warning and does not bl
 test("mail sent before a session starts is delivered at its start, and a resumed session gets what arrived while closed", async () => {
 	const a = session(newId("a"));
 	const bId = newId("b");
-	await a.mailbox(`${bId} task before launch`);
+	await a.request(bId, "task before launch");
 	const b = session(bId);
 	await b.start();
 	assert.equal(b.sent.length, 1);
 	await b.shutdown();
-	await a.mailbox(`${bId} while closed`);
+	await a.request(bId, "while closed");
 	const resumed = session(bId);
 	await resumed.start("resume");
 	await resumed.shutdown();
@@ -362,7 +432,7 @@ test("after session_shutdown nothing more is delivered", async () => {
 	await b.start();
 	await b.shutdown();
 	await b.shutdown(); // idempotent
-	await a.mailbox(`${b.id} too late`);
+	await a.request(b.id, "too late");
 	await new Promise((r) => setTimeout(r, 1300));
 	assert.equal(b.sent.length, 0);
 	assert.equal(files(b.id, "new").length, 1);
@@ -374,7 +444,7 @@ test("after session_shutdown nothing more is delivered", async () => {
 test("a request is answered once the recipient settles, not at agent_end, and the reply reaches the sender", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} what is 2 + 2?`);
+	await a.request(b.id, "what is 2 + 2?");
 	const [request] = envelopes(a.id, "sent");
 	await b.start();
 	await b.agentEnd("It is 4.");
@@ -402,9 +472,9 @@ test("one reply per sender per settle lists every request it answers", async () 
 	const a = session(newId("a"));
 	const c = session(newId("c"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} one`);
-	await a.mailbox(`${b.id} two`);
-	await c.mailbox(`${b.id} three`);
+	await a.request(b.id, "one");
+	await a.request(b.id, "two");
+	await c.request(b.id, "three");
 	const aIds = envelopes(a.id, "sent").map((e) => e.id);
 	const cIds = envelopes(c.id, "sent").map((e) => e.id);
 	await b.start();
@@ -421,7 +491,7 @@ test("one reply per sender per settle lists every request it answers", async () 
 test("a settle without an assistant answer still replies, with a placeholder", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} hello`);
+	await a.request(b.id, "hello");
 	await b.start();
 	await b.answer();
 	await b.shutdown();
@@ -432,7 +502,7 @@ test("a settle without an assistant answer still replies, with a placeholder", a
 test("replies are never answered, and a settle with nothing pending sends nothing", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} ping`);
+	await a.request(b.id, "ping");
 	await b.start();
 	await b.answer("pong");
 	await a.start();
@@ -676,7 +746,7 @@ test("an envelope with an invalid from gets no reply", async () => {
 test("a request dropped before it entered the conversation is answered failed, not done", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} never read`);
+	await a.request(b.id, "never read");
 	const [request] = envelopes(a.id, "sent");
 	b.drop(true);
 	await b.start();
@@ -693,9 +763,9 @@ test("a request dropped before it entered the conversation is answered failed, n
 test("one sender with a seen and an unseen request in one settle gets a done reply and a failed reply", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} read this`);
+	await a.request(b.id, "read this");
 	await b.start();
-	await a.mailbox(`${b.id} dropped`);
+	await a.request(b.id, "dropped");
 	const [readId, droppedId] = envelopes(a.id, "sent").map((e) => e.id);
 	b.drop(true);
 	await until(() => b.sent.length === 2, "B to receive the second request");
@@ -713,7 +783,7 @@ test("one sender with a seen and an unseen request in one settle gets a done rep
 test("a failed reply is injected with a header saying the request failed", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} never read`);
+	await a.request(b.id, "never read");
 	const [request] = envelopes(a.id, "sent");
 	b.drop(true);
 	await b.start();
@@ -733,7 +803,7 @@ test("a failed reply is injected with a header saying the request failed", async
 test("a run the user stopped holds the request, and the next completed run answers it done, saying the user took over", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} do the thing`);
+	await a.request(b.id, "do the thing");
 	const [request] = envelopes(a.id, "sent");
 	await b.start();
 	await b.answer("half of the answer", { aborted: true });
@@ -756,7 +826,7 @@ test("a run the user stopped holds the request, and the next completed run answe
 test("a held request answered by a run with no text says the user took over and that there is no answer text", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} do the thing`);
+	await a.request(b.id, "do the thing");
 	await b.start();
 	await b.answer(undefined, { aborted: true });
 	assert.deepEqual(envelopes(a.id, "new"), []);
@@ -770,7 +840,7 @@ test("a held request answered by a run with no text says the user took over and 
 test("a run the user stopped during a tool call holds the request, and the next completed run answers it", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} do the thing`);
+	await a.request(b.id, "do the thing");
 	await b.start();
 	await b.stopInToolCall("Sleeping first.");
 	assert.deepEqual(envelopes(a.id, "new"), []);
@@ -785,7 +855,7 @@ test("a run the user stopped during a tool call holds the request, and the next 
 test("a request stays held through a second stop and a failed run, then gets one done reply", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} do the thing`);
+	await a.request(b.id, "do the thing");
 	const [request] = envelopes(a.id, "sent");
 	await b.start();
 	await b.answer("first try", { aborted: true });
@@ -806,7 +876,7 @@ test("a request stays held through a second stop and a failed run, then gets one
 test("a failed run with no stop before it still replies failed", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} do the thing`);
+	await a.request(b.id, "do the thing");
 	await b.start();
 	await b.failOnApiError("529 overloaded_error");
 	const [reply] = envelopes(a.id, "new");
@@ -817,7 +887,7 @@ test("a failed run with no stop before it still replies failed", async () => {
 test("a run that ends on an API error replies failed with the error and the text before it", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} do the thing`);
+	await a.request(b.id, "do the thing");
 	await b.start();
 	await b.failOnApiError("529 overloaded_error", "Reading first.");
 	const [reply] = envelopes(a.id, "new");
@@ -830,7 +900,7 @@ test("a run that ends on an API error replies failed with the error and the text
 test("a run that ends on an API error with no message or text still replies failed", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} do the thing`);
+	await a.request(b.id, "do the thing");
 	await b.start();
 	await b.failOnApiError(undefined);
 	const [reply] = envelopes(a.id, "new");
@@ -842,9 +912,9 @@ test("a run that ends on an API error with no message or text still replies fail
 test("a stopped run's unseen requests still get a failed reply, and its read ones are held", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} read this`);
+	await a.request(b.id, "read this");
 	await b.start();
-	await a.mailbox(`${b.id} dropped`);
+	await a.request(b.id, "dropped");
 	const [readId, droppedId] = envelopes(a.id, "sent").map((e) => e.id);
 	b.drop(true);
 	await until(() => b.sent.length === 2, "B to receive the second request");
@@ -860,8 +930,8 @@ test("a stopped run's unseen requests still get a failed reply, and its read one
 test("an injected reply quotes every request it answers with its sent/ copy's path", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} first request`);
-	await a.mailbox(`${b.id} second request`);
+	await a.request(b.id, "first request");
+	await a.request(b.id, "second request");
 	const ids = envelopes(a.id, "sent").map((e) => e.id);
 	const copies = files(a.id, "sent");
 	await b.start();
@@ -883,7 +953,7 @@ test("a request over 2 KiB is quoted cut on a character boundary, naming its cop
 	const a = session(newId("a"));
 	const b = session(newId("b"));
 	const long = `${"x".repeat(2 * 1024 - 1)}é${"y".repeat(500)}`;
-	await a.mailbox(`${b.id} ${long}`);
+	await a.request(b.id, long);
 	const [copy] = files(a.id, "sent");
 	await b.start();
 	await b.answer("short");
@@ -922,7 +992,7 @@ test("a reply to a request with no sent/ copy names the id and still delivers", 
 test("an injected reply does not trigger a turn; an injected request still does", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} question`);
+	await a.request(b.id, "question");
 	await b.start();
 	await b.answer("answer");
 	await a.start();
@@ -936,7 +1006,7 @@ test("injected mail ends with a line closing it, so text after it reads as not t
 	const a = session(newId("a"));
 	const b = session(newId("b"), { name: "bravo" });
 	await b.start();
-	await a.mailbox(`${b.id} question`);
+	await a.request(b.id, "question");
 	await until(() => b.sent.length === 1, "B to receive");
 	await b.answer("answer");
 	await a.start();
@@ -955,7 +1025,7 @@ test("injected mail ends with a line closing it, so text after it reads as not t
 test("a quiet reply says the user made the request, with /mailbox or through an extension", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} question`);
+	await a.request(b.id, "question");
 	await b.start();
 	await b.answer("answer");
 	await a.start();
@@ -972,7 +1042,7 @@ test("a quiet reply says the user made the request, with /mailbox or through an 
 test("a sent/ file whose name matches but whose envelope id differs is not quoted", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.mailbox(`${b.id} the real request`);
+	await a.request(b.id, "the real request");
 	const [request] = envelopes(a.id, "sent");
 	const [copy] = files(a.id, "sent");
 	// An old file can end in the same `-<id>.json`, so the parsed id still decides.
@@ -1058,7 +1128,7 @@ test("message:inbound sees every delivered envelope, replies with their in_reply
 	const seenByB: Inbound[] = [];
 	a.events.on("message:inbound", (p) => void seenByA.push(p as Inbound));
 	b.events.on("message:inbound", (p) => void seenByB.push(p as Inbound));
-	await a.mailbox(`${b.id} ping`);
+	await a.request(b.id, "ping");
 	const [request] = envelopes(a.id, "sent");
 	const [requestCopy] = files(a.id, "sent");
 	await b.start();
@@ -1087,7 +1157,7 @@ test("a listener that sets handled stops the injection, but a request still gets
 	b.events.on("message:inbound", (p) => {
 		(p as { handled: boolean }).handled = true;
 	});
-	await a.mailbox(`${b.id} handled elsewhere`);
+	await a.request(b.id, "handled elsewhere");
 	await b.start();
 	assert.equal(b.sent.length, 0);
 	await b.answer("still answered");
@@ -1115,14 +1185,14 @@ test("the status counts mail until it enters the conversation, and hides at zero
 	await b.start();
 	try {
 		// Mail that enters the conversation at once is never unread.
-		await a.mailbox(`${b.id} first`);
+		await a.request(b.id, "first");
 		assert.equal(a.status(), undefined);
 		await until(() => b.sent.length === 1, "B to receive the first");
 		assert.equal(b.status(), undefined);
 		await b.answer("one");
 		// Held back from the conversation, mail stays unread until the run settles.
 		b.drop(true);
-		await a.mailbox(`${b.id} second`);
+		await a.request(b.id, "second");
 		await until(() => b.sent.length === 2, "B to receive the second");
 		assert.equal(b.status(), "📬 1 unread");
 		await b.answer("two");
@@ -1130,13 +1200,13 @@ test("the status counts mail until it enters the conversation, and hides at zero
 		// A reply to an idle session is appended at once with no message_end; to a busy one it queues.
 		await until(() => a.sent.length === 2, "A to receive both replies");
 		a.drop(true);
-		await a.mailbox(`${b.id} third`);
+		await a.request(b.id, "third");
 		await until(() => b.sent.length === 3, "B to receive the third");
 		await b.answer("three");
 		await until(() => a.sent.length === 3, "A to receive the third reply");
 		assert.equal(a.status(), undefined);
 		await a.agentStart();
-		await a.mailbox(`${b.id} fourth`);
+		await a.request(b.id, "fourth");
 		await until(() => b.sent.length === 4, "B to receive the fourth");
 		await b.answer("four");
 		await until(() => a.sent.length === 4, "A to receive the fourth reply");
@@ -1151,8 +1221,8 @@ test("the awaiting count survives a resume", async () => {
 	const aId = newId("a");
 	const a = session(aId);
 	await a.start();
-	await a.mailbox(`${newId("b")} one`);
-	await a.mailbox(`${newId("b")} two`);
+	await a.request(newId("b"), "one");
+	await a.request(newId("b"), "two");
 	await a.shutdown();
 	const resumed = session(aId);
 	await resumed.start("resume");
@@ -1163,7 +1233,7 @@ test("the awaiting count survives a resume", async () => {
 test("without a UI there is no status, and delivery still works", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"), { hasUI: false });
-	await a.mailbox(`${b.id} headless`);
+	await a.request(b.id, "headless");
 	await b.start();
 	await b.answer("ok");
 	await b.shutdown();
@@ -1181,7 +1251,7 @@ test("a reply quoting several requests still quotes each copy, in order", async 
 	const a = session(newId("a"));
 	const b = newId("b");
 	await a.start();
-	for (const body of ["first", "second", "third"]) await a.mailbox(`${b} ${body}`);
+	for (const body of ["first", "second", "third"]) await a.request(b, body);
 	const ids = envelopes(a.id, "sent").map((e) => e.id);
 	assert.equal(ids.length, 3);
 	writeFileSync(
@@ -1491,7 +1561,7 @@ test("pruning never follows a symlink or touches a name that is no address", asy
 	mkdirSync(odd, { recursive: true });
 	age(odd, 400);
 	const a = session(newId());
-	await a.mailbox("prune");
+	await a.command("mailbox:prune");
 	assert.ok(existsSync(join(outside, "new")), "the symlink's target is untouched");
 	assert.ok(existsSync(link));
 	assert.ok(existsSync(file));
@@ -1501,7 +1571,7 @@ test("pruning never follows a symlink or touches a name that is no address", asy
 	rmSync(odd, { recursive: true });
 });
 
-test("/mailbox prune removes closed sessions' folders of any age, keeps unread mail, and says how many", async () => {
+test("/mailbox:prune removes closed sessions' folders of any age, keeps unread mail, and says how many", async () => {
 	const fresh = folder(newId(), 0);
 	const old = folder(newId(), 90);
 	const unread = folder(newId(), 90, true);
@@ -1509,7 +1579,7 @@ test("/mailbox prune removes closed sessions' folders of any age, keeps unread m
 	await live.start();
 	const a = session(newId());
 	await a.start();
-	await a.mailbox("prune");
+	await a.command("mailbox:prune");
 	assert.ok(a.notes.at(-1)?.startsWith("Removed "));
 	assert.ok(!existsSync(fresh) && !existsSync(old));
 	assert.ok(existsSync(unread));
@@ -1519,20 +1589,26 @@ test("/mailbox prune removes closed sessions' folders of any age, keeps unread m
 	rmSync(unread, { recursive: true });
 	const one = folder(newId(), 1);
 	const two = folder(newId(), 1);
-	await a.mailbox("prune");
+	await a.command("mailbox:prune");
 	assert.equal(a.notes.at(-1), "Removed 2 mailbox folders of closed sessions");
 	assert.ok(!existsSync(one) && !existsSync(two));
 	await a.shutdown();
 	await live.shutdown();
 });
 
-test("/mailbox prune <text> is still a send to a session named or prefixed prune", async () => {
+test("/mailbox with arguments shows usage instead of sending or pruning", async () => {
 	const target = session(newId(), { name: "prune" });
 	await target.start();
+	const closed = folder(newId(), 0);
 	const a = session(newId());
-	await a.mailbox("prune hello there");
-	assert.equal(envelopes(target.id, "new").length + envelopes(target.id, "cur").length, 1);
-	assert.equal(a.notes.at(-1)?.startsWith("Sent "), true);
+	await a.start();
+	for (const args of [`${target.id} hello`, "prune"]) await a.mailbox(args);
+	const usage = "Usage: /mailbox:send to send a message, or /mailbox:prune to remove closed sessions' folders";
+	assert.deepEqual(a.errors, [usage, usage]);
+	assert.equal(envelopes(target.id, "new").length + envelopes(target.id, "cur").length, 0);
+	assert.ok(existsSync(closed), "a closed session's folder is not pruned");
+	assert.deepEqual(files(a.id, "sent"), []);
+	rmSync(closed, { recursive: true });
 	await target.shutdown();
 });
 

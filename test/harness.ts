@@ -15,6 +15,7 @@ import type { Component } from "@earendil-works/pi-tui";
 import { Value } from "typebox/value";
 
 import register from "../src/index.ts";
+import { send } from "../src/store.ts";
 
 export const dir = mkdtempSync(join(tmpdir(), "mailbox-test-"));
 process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
@@ -247,6 +248,8 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 		},
 		/** Run `/mailbox args`; Pi starts a session before any command, so a session not yet started starts first. */
 		mailbox: (args: string) => command("mailbox", args),
+		/** Send a request as the removed typed `/mailbox <to> <text>` did: `send()`, kind request, hops 0. */
+		request: (to: string, text: string) => send(sessionId, to, text.trim(), { kind: "request", hops: 0 }),
 		/** Rename the session, as `/name` does, and tell the extension. */
 		setName: (next: string | undefined) => {
 			name = next;

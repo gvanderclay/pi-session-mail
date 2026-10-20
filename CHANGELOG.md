@@ -6,6 +6,13 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `/mailbox:send` lists the other running sessions, asks for the text and
+  sends it as a message, which expects no answer.
+- `/mailbox:prune` removes closed sessions' mailbox folders without the age
+  limit.
+
 ### Changed
 
 - The footer shows only `📬 N unread`: mail that reached this session but has
@@ -13,6 +20,15 @@ follows [Semantic Versioning](https://semver.org/).
   the run settles. The `read` and `awaiting` counts are gone from it, because
   `read` only grew and `awaiting` stayed up for requests a stopped session
   still held. The status tests now pin the new footer.
+
+### Removed
+
+- The typed `/mailbox <to> <text>` and `/mailbox prune` forms (breaking).
+  `/mailbox:send` and `/mailbox:prune` replace them, and any argument to
+  `/mailbox` now shows a usage notice naming the two new commands. The tests
+  of the typed send changed deliberately: delivery tests now use a harness
+  helper that sends a request with hops 0 through `send()`, and tests of name
+  and id resolution moved to `session_mail_send`.
 
 ## [0.3.0] - 2026-10-19
 
