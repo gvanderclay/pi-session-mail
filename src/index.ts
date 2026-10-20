@@ -41,7 +41,6 @@ import { type SettleInput, settle } from "./settle.ts";
 import {
 	boxPath,
 	claim,
-	diskCounts,
 	type Envelope,
 	ensureBoxes,
 	findSent,
@@ -242,8 +241,8 @@ export default function mailbox(pi: ExtensionAPI) {
 	let lastAborted = false;
 	/** The error that ended that run when the user did not stop it; undefined when none did. */
 	let lastError: string | undefined;
-	/** Messages injected since the last settle, for the status's pending count. */
-	let injected = 0;
+	/** Ids of injected mail that has not entered the conversation yet, for the status's unread count. */
+	let unread = new Set<string>();
 	/**
 	 * The hop count of the current turn: 0 once the user starts or steers it,
 	 * otherwise the highest `hops` + 1 among the envelopes that started or
@@ -294,18 +293,11 @@ export default function mailbox(pi: ExtensionAPI) {
 		warn(`${folder} is mode ${mode.toString(8)}, open to other users; run: chmod 700 ${folder}`);
 	}
 
-	/** Footer entry `✉ N pending · N read · N awaiting`, non-zero parts only; hidden when all are zero. */
+	/** Footer entry `📬 N unread`: mail not yet claimed or not yet in the conversation; hidden at zero. */
 	function updateStatus() {
 		if (!ctx?.hasUI || address === undefined) return;
-		const counts = diskCounts(address);
-		const parts = [
-			[counts.unclaimed + injected, "pending"],
-			[counts.read, "read"],
-			[counts.awaiting, "awaiting"],
-		]
-			.filter(([n]) => n !== 0)
-			.map(([n, label]) => `${n} ${label}`);
-		ctx.ui.setStatus(STATUS_KEY, parts.length > 0 ? `✉ ${parts.join(" · ")}` : undefined);
+		const count = listNew(address).length + unread.size;
+		ctx.ui.setStatus(STATUS_KEY, count > 0 ? `📬 ${count} unread` : undefined);
 	}
 
 	/** A first scan deferred to the next event-loop turn; see `session_start`. */
@@ -347,7 +339,8 @@ export default function mailbox(pi: ExtensionAPI) {
 			seen.add(envelope.id);
 			return;
 		}
-		injected++;
+		// Pi appends a reply to an idle session at once and fires no `message_end` for it.
+		if (wakes || state === "busy") unread.add(envelope.id);
 		pi.sendMessage(
 			{
 				customType: CUSTOM_TYPE,
@@ -402,7 +395,6 @@ export default function mailbox(pi: ExtensionAPI) {
 			// fresh one. It is never refused here: the receiving side enforces the limit.
 			const hopsNow = state === "busy" ? hops : 0;
 			payload.envelope = send(address, payload.to as string, payload.body, { kind: "request", hops: hopsNow });
-			updateStatus();
 		} catch (err) {
 			payload.error = (err as Error).message;
 		}
@@ -443,7 +435,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		lastAnswer = undefined;
 		lastAborted = false;
 		lastError = undefined;
-		injected = 0;
+		unread = new Set();
 		hops = 0;
 		tools?.abandonAsk();
 		waitingOn = "";
@@ -498,7 +490,9 @@ export default function mailbox(pi: ExtensionAPI) {
 	pi.on("message_end", async (event) => {
 		const message = event.message as { role?: string; customType?: string; details?: { id?: unknown } };
 		if (message?.role !== "custom" || message.customType !== CUSTOM_TYPE) return;
-		if (typeof message.details?.id === "string") seen.add(message.details.id);
+		if (typeof message.details?.id !== "string") return;
+		seen.add(message.details.id);
+		if (unread.delete(message.details.id)) updateStatus();
 	});
 
 	// Typed text, RPC input and a prompt a command sends all come from the
@@ -566,7 +560,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		lastAnswer = undefined;
 		lastAborted = false;
 		lastError = undefined;
-		injected = 0;
+		unread = new Set();
 		state = "idle";
 		announce();
 		if (me === undefined) return;
@@ -597,7 +591,6 @@ export default function mailbox(pi: ExtensionAPI) {
 	});
 
 	tools = registerTools(pi, {
-		sent: () => updateStatus(),
 		waitingOn: (to) => {
 			waitingOn = to;
 			announce();
@@ -642,7 +635,6 @@ export default function mailbox(pi: ExtensionAPI) {
 				const to = resolveTo(match[1], me);
 				const envelope = send(me, to, match[2].trim(), { kind: "request", hops: 0 });
 				context.ui.notify(`Sent ${envelope.id} to ${envelope.to}`, "info");
-				updateStatus();
 			} catch (err) {
 				context.ui.notify(`mailbox: ${(err as Error).message}`, "error");
 			}

@@ -6,6 +6,14 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The footer shows only `📬 N unread`: mail that reached this session but has
+  not entered its conversation yet. It clears as each message enters, not when
+  the run settles. The `read` and `awaiting` counts are gone from it, because
+  `read` only grew and `awaiting` stayed up for requests a stopped session
+  still held. The status tests now pin the new footer.
+
 ## [0.3.0] - 2026-10-19
 
 ### Added

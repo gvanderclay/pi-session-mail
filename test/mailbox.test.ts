@@ -25,7 +25,7 @@ import { test } from "node:test";
 
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 
-import { pruneClosed } from "../src/store.ts";
+import { diskCounts, pruneClosed } from "../src/store.ts";
 import { box, dir, envelopes, files, newId, records, session, stateRoot, turn, until } from "./harness.ts";
 
 const root = stateRoot();
@@ -1108,22 +1108,39 @@ test("a session with an empty mailbox shows no mailbox status", async () => {
 	assert.equal(a.status(), undefined);
 });
 
-test("the status counts awaiting, pending and read, and hides parts that are zero", async () => {
+test("the status counts mail until it enters the conversation, and hides at zero", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
 	await a.start();
 	await b.start();
 	try {
-		await a.mailbox(`${b.id} question`);
-		assert.equal(a.status(), "✉ 1 awaiting");
-		await until(() => b.sent.length === 1, "B to receive");
-		assert.equal(b.status(), "✉ 1 pending · 1 read");
-		await b.answer("answer");
-		assert.equal(b.status(), "✉ 1 read");
-		await until(() => a.sent.length === 1, "A to receive the reply");
-		assert.equal(a.status(), "✉ 1 pending · 1 read");
-		await a.answer("thanks");
-		assert.equal(a.status(), "✉ 1 read");
+		// Mail that enters the conversation at once is never unread.
+		await a.mailbox(`${b.id} first`);
+		assert.equal(a.status(), undefined);
+		await until(() => b.sent.length === 1, "B to receive the first");
+		assert.equal(b.status(), undefined);
+		await b.answer("one");
+		// Held back from the conversation, mail stays unread until the run settles.
+		b.drop(true);
+		await a.mailbox(`${b.id} second`);
+		await until(() => b.sent.length === 2, "B to receive the second");
+		assert.equal(b.status(), "📬 1 unread");
+		await b.answer("two");
+		assert.equal(b.status(), undefined);
+		// A reply to an idle session is appended at once with no message_end; to a busy one it queues.
+		await until(() => a.sent.length === 2, "A to receive both replies");
+		a.drop(true);
+		await a.mailbox(`${b.id} third`);
+		await until(() => b.sent.length === 3, "B to receive the third");
+		await b.answer("three");
+		await until(() => a.sent.length === 3, "A to receive the third reply");
+		assert.equal(a.status(), undefined);
+		await a.agentStart();
+		await a.mailbox(`${b.id} fourth`);
+		await until(() => b.sent.length === 4, "B to receive the fourth");
+		await b.answer("four");
+		await until(() => a.sent.length === 4, "A to receive the fourth reply");
+		assert.equal(a.status(), "📬 1 unread");
 	} finally {
 		await a.shutdown();
 		await b.shutdown();
@@ -1140,7 +1157,7 @@ test("the awaiting count survives a resume", async () => {
 	const resumed = session(aId);
 	await resumed.start("resume");
 	await resumed.shutdown();
-	assert.equal(resumed.status(), "✉ 2 awaiting");
+	assert.deepEqual(diskCounts(aId), { unclaimed: 0, read: 0, awaiting: 2 });
 });
 
 test("without a UI there is no status, and delivery still works", async () => {

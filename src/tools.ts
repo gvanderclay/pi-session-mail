@@ -24,8 +24,6 @@ import { type Envelope, send } from "./store.ts";
 
 /** What the tools need from the extension around them. */
 export type ToolHooks = {
-	/** Called after a tool wrote mail, so the footer can count it. */
-	sent: () => void;
 	/** The current turn's hop count, which mail sent now carries. */
 	hops: () => number;
 	/** Report a broken `session-mail.json`; the extension shows one warning per session. */
@@ -280,7 +278,6 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 			const hops = hooks.hops();
 			checkHops(hops, hooks);
 			const envelope = send(me, to, body, { kind: "message", hops });
-			hooks.sent();
 			const target = listRunning().find((record) => record.address === to);
 			const text =
 				target === undefined
@@ -335,7 +332,6 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 			const hops = hooks.hops();
 			checkHops(hops, hooks);
 			const ask = send(me, to, body, { kind: "ask", hops });
-			hooks.sent();
 			const outcome = await new Promise<AskOutcome>((resolve) => {
 				const finish = (result: AskOutcome) => {
 					if (waiting?.id !== ask.id) return;
@@ -384,7 +380,6 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 			const body = typeof params.message === "string" ? params.message.trim() : "";
 			if (body === "") throw new Error("the answer is empty; nothing was sent");
 			const answer = reply(id, body);
-			hooks.sent();
 			const sender = listRunning().find((record) => record.address === answer.to);
 			const who = sender === undefined ? answer.to : `${label(sender)} (${answer.to})`;
 			const result = { id: answer.id, ask: id, to: answer.to };
