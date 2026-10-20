@@ -669,7 +669,7 @@ export default function mailbox(pi: ExtensionAPI) {
 
 	pi.registerCommand("mailbox", {
 		description:
-			"Open this session's mail: s changes the filter, enter opens an item, esc closes. Send a message with /mailbox:send; remove closed sessions' folders with /mailbox:prune",
+			"Open this session's mail: tab changes the filter, enter opens an item, esc closes. Send a message with /mailbox:send; remove closed sessions' folders with /mailbox:prune",
 		handler: async (args, context) => {
 			const me = address;
 			if (me === undefined) {

@@ -84,7 +84,7 @@ async function deleteSelected(
 	return reopened(s, before);
 }
 
-test("s cycles five filters, each showing its own rows and statuses, newest first", async () => {
+test("tab cycles five filters, each showing its own rows and statuses, newest first", async () => {
 	const { me, open, gone } = await mailInEveryState();
 	const { dialog, closed } = await openPicker(me);
 	const title = (filter: string) => `Mailbox · me · ${me.id.slice(0, 8)} · ${filter}`;
@@ -93,7 +93,7 @@ test("s cycles five filters, each showing its own rows and statuses, newest firs
 		assert.ok(render(dialog).includes("fresh mail"));
 		assert.ok(!render(dialog).includes("seen before"));
 
-		await dialog.press("s");
+		await dialog.press("\t");
 		assert.ok(render(dialog).includes(title("awaiting")));
 		assert.ok(render(dialog).includes("running request"));
 		assert.ok(render(dialog).includes("closed request"));
@@ -103,13 +103,13 @@ test("s cycles five filters, each showing its own rows and statuses, newest firs
 		assert.match(shown(dialog, "running request", 40), /running/, "the marker survives width 40");
 		assert.match(shown(dialog, "closed request", 40), /closed/, "the marker survives width 40");
 
-		await dialog.press("s");
+		await dialog.press("\t");
 		assert.ok(render(dialog).includes(title("read")));
 		assert.ok(render(dialog).includes("seen before"));
 		assert.ok(render(dialog).includes("the answer"));
 		assert.ok(!render(dialog).includes("fresh mail"));
 
-		await dialog.press("s");
+		await dialog.press("\t");
 		assert.ok(render(dialog).includes(title("sent")));
 		for (const status of ["awaiting", "answered", "message"]) assert.ok(render(dialog).includes(`· ${status}`));
 		assert.ok(render(dialog).includes("· awaiting · running"));
@@ -119,7 +119,11 @@ test("s cycles five filters, each showing its own rows and statuses, newest firs
 		assert.match(shown(dialog, "answered request", 40), /answered/, "status survives width 40");
 		assert.match(shown(dialog, "sent message", 40), /message/, "status survives width 40");
 
-		await dialog.press("s");
+		await dialog.press("\x1b[Z");
+		assert.ok(render(dialog).includes(title("read")), "shift+tab goes back");
+		await dialog.press("\t");
+		assert.ok(render(dialog).includes(title("sent")));
+		await dialog.press("\t");
 		assert.ok(render(dialog).includes(title("all")));
 		for (const label of [
 			"seen before",
@@ -156,7 +160,7 @@ test("s cycles five filters, each showing its own rows and statuses, newest firs
 		assert.match(shown(dialog, "closed request", 40), /awaiting.*closed/);
 		assert.match(shown(dialog, "sent message", 40), /message/);
 
-		await dialog.press("s");
+		await dialog.press("\t");
 		assert.ok(render(dialog).includes(title("unread")));
 	} finally {
 		await dialog.press("\x1b");
@@ -230,7 +234,7 @@ test("Enter opens the detail screen, and Esc returns to the same row and filter"
 	}
 });
 
-test("an empty filter says there is nothing there, and s and esc still work", async () => {
+test("an empty filter says there is nothing there, and tab and esc still work", async () => {
 	const me = session(newId());
 	const { dialog, closed } = await openPicker(me);
 	try {
@@ -242,7 +246,7 @@ test("an empty filter says there is nothing there, and s and esc still work", as
 			["Nothing sent", "sent"],
 			["No mail", "all"],
 		]) {
-			await dialog.press("s");
+			await dialog.press("\t");
 			assert.ok(render(dialog).includes(empty), filter);
 			assert.ok(render(dialog).includes(`· ${filter}`), filter);
 		}
@@ -332,8 +336,8 @@ test("peer labels and running state are a snapshot taken before the picker opens
 		assert.match(shown(dialog, "snapshot request", 40), /running/);
 		await peer.shutdown();
 		stopped = true;
-		await dialog.press("s");
-		await dialog.press("s");
+		await dialog.press("\t");
+		await dialog.press("\t");
 		assert.match(shown(dialog, "snapshot request", 40), /running/, "the open picker keeps its snapshot");
 	} finally {
 		await dialog.press("\x1b");
@@ -453,7 +457,7 @@ test("d does nothing on unread mail and the hint stops offering it", async () =>
 	await peer.toolCall("session_mail_send", { to: me.id, message: "not read yet" });
 	await until(() => me.status() === "📬 1 unread", "the unread message");
 	const hint = (dialog: Session["dialogs"][number]): string =>
-		dialog.component.render(100).find((line) => line.includes("s filter")) ?? "";
+		dialog.component.render(100).find((line) => line.includes("tab filter")) ?? "";
 	const { dialog, closed } = await openPicker(me);
 	try {
 		assert.ok(render(dialog).includes("· unread"));
@@ -463,7 +467,7 @@ test("d does nothing on unread mail and the hint stops offering it", async () =>
 		assert.equal(dialog.result(), undefined, "the picker did not resolve");
 		assert.equal(me.status(), "📬 1 unread", "the mail is still on disk");
 		// The all view mixes statuses, so the hint follows the selected row, not the filter.
-		for (let i = 0; i < 4; i++) await dialog.press("s");
+		for (let i = 0; i < 4; i++) await dialog.press("\t");
 		assert.ok(render(dialog).includes("· all"));
 		assert.ok(!hint(dialog).includes("d delete"), "the unread row is selected first");
 		await dialog.press("\x1b[B");
@@ -494,7 +498,7 @@ test("d drops an awaiting request after a confirm", async () => {
 			["never answered"],
 		);
 		assert.deepEqual(envelopes(me.id, "sent"), [], "the sent copy is gone");
-		for (let i = 0; i < 2; i++) await open.press("s");
+		for (let i = 0; i < 2; i++) await open.press("\t");
 		assert.ok(render(open).includes("Nothing is waiting for a reply"), render(open));
 	} finally {
 		await open.press("\x1b");
@@ -523,7 +527,7 @@ test("deleting a read reply also deletes the sent copy of the request it answere
 		);
 		assert.deepEqual(envelopes(me.id, "cur"), [], "the reply is gone");
 		assert.deepEqual(envelopes(me.id, "sent"), [], "the answered request's copy went with it");
-		for (let i = 0; i < 2; i++) await open.press("s");
+		for (let i = 0; i < 2; i++) await open.press("\t");
 		assert.ok(render(open).includes("Nothing is waiting for a reply"), render(open));
 	} finally {
 		await open.press("\x1b");
@@ -545,7 +549,7 @@ test("d deletes a sent message and an answered request", async () => {
 	const { dialog, closed } = await openPicker(me);
 	let open = dialog;
 	try {
-		for (let i = 0; i < 4; i++) await open.press("s");
+		for (let i = 0; i < 4; i++) await open.press("\t");
 		assert.ok(render(open).includes("· sent"));
 		assert.match(shown(open, "the request"), /answered/);
 		assert.match(shown(open, "a message"), /message/);
@@ -583,7 +587,7 @@ test("a reply to a dropped request is still delivered, quoting the id alone", as
 	const { dialog, closed } = await openPicker(me);
 	let open = dialog;
 	try {
-		for (let i = 0; i < 2; i++) await open.press("s");
+		for (let i = 0; i < 2; i++) await open.press("\t");
 		assert.ok(render(open).includes("· awaiting"));
 		assert.ok(render(open).includes("drop me"));
 		open = await deleteSelected(me, open, true);
