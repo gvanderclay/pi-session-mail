@@ -193,10 +193,8 @@ function parseEnvelope(value: unknown): Envelope {
 	const envelope = { ...value } as Partial<Envelope>;
 	if (typeof envelope.id !== "string" || envelope.id === "") throw new Error("missing id");
 	if (!isAddress(envelope.from)) throw new Error(`invalid from address ${JSON.stringify(envelope.from)}`);
-	if (!isAddress(envelope.to)) throw new Error(`invalid to address ${JSON.stringify(envelope.to)}`);
 	envelope.in_reply_to = replyIds(envelope.in_reply_to);
 	if (typeof envelope.body !== "string") throw new Error("missing body");
-	if (typeof envelope.ts !== "string") throw new Error("missing ts");
 	if (envelope.kind === undefined) envelope.kind = envelope.in_reply_to.length > 0 ? "reply" : "request";
 	else if (!KINDS.includes(envelope.kind)) envelope.kind = "message";
 	if (envelope.hops === undefined) envelope.hops = 0;
@@ -260,7 +258,11 @@ function envelopesIn(
 		}
 		if (error === undefined) {
 			try {
-				envelope = parseEnvelope(parsed);
+				const valid = parseEnvelope(parsed);
+				// The picker shows `to` and sorts by `ts`; delivery does not need them, so only this reader requires them.
+				if (!isAddress(valid.to)) throw new Error(`invalid to address ${JSON.stringify(valid.to)}`);
+				if (typeof valid.ts !== "string") throw new Error("missing ts");
+				envelope = valid;
 			} catch (err) {
 				error = (err as Error).message;
 			}
