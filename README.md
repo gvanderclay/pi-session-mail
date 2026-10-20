@@ -2,11 +2,11 @@
 
 A file mailbox between Pi sessions on the same machine.
 
-Each Pi session gets an address and an inbox. You send a request to another
-running session with `/mailbox`, and the model lists, asks, answers and sends
-through four `session_mail_*` tools. Mail waits on disk until the recipient
-starts or resumes, and the recipient's final answer goes back to the sender
-automatically.
+Each Pi session gets an address and an inbox. You send a message to another
+running session with `/mailbox:send`, and the model lists, asks, answers and
+sends through four `session_mail_*` tools. Mail waits on disk until the
+recipient starts or resumes, and the recipient's final answer goes back to the
+sender automatically.
 
 ## Install
 
@@ -36,16 +36,17 @@ In a Pi session, show its address and name:
 The session's id is its address. Other sessions see its Pi session name (set it
 with `/name`), or the first 8 characters of its id when it has none.
 
-In another session, send a request to that name or to an id prefix of at least
-8 characters:
+In another session, send a message by picking a running session from a list
+and then typing the text:
 
 ```text
-/mailbox <to> <text>
+/mailbox:send
 ```
 
-The sender sees `Sent <id> to <address>`. The recipient's model receives the
-text and works on it, and its last answer comes back to the sender as a reply
-when that run settles. [Addressing](#addressing) lists how `<to>` resolves.
+The sender sees `Sent <id> to <address>`. A message wakes the recipient's model
+and expects no answer. The model sends requests, asks and answers through the
+`session_mail_*` tools, and a request's last answer comes back to the sender as
+a reply when that run settles.
 
 The footer shows `📬 N unread` while mail has reached this session but not yet
 entered its conversation, such as mail queued behind a busy run; it is hidden
@@ -120,7 +121,7 @@ The model gets four tools:
 
 ## Addressing
 
-A `to`, typed after `/mailbox` or given to a tool, resolves as follows:
+A `to` given to a tool resolves as follows:
 
 1. A running session's address, or any full session id (a UUID), resolves as
    given, so a closed session is still reached by its full id and its mail
@@ -138,9 +139,9 @@ A `to`, typed after `/mailbox` or given to a tool, resolves as follows:
 
 | Kind | Written by | Delivered as | Answered |
 | --- | --- | --- | --- |
-| `request` | `/mailbox <to> <text>`, `message:send` | `triggerTurn`, `deliverAs: "steer"` | yes, when a run completes; held while the user has taken over |
+| `request` | `message:send` | `triggerTurn`, `deliverAs: "steer"` | yes, when a run completes; held while the user has taken over |
 | `ask` | `session_mail_ask` | `triggerTurn`, `deliverAs: "steer"` | yes, when the run settles |
-| `message` | `session_mail_send` | `triggerTurn`, `deliverAs: "steer"` | never |
+| `message` | `session_mail_send`, `/mailbox:send` | `triggerTurn`, `deliverAs: "steer"` | never |
 | `reply` | the answering session | `deliverAs: "followUp"`, no turn; see below for answers to asks | never |
 
 Mail for the model wakes an idle session, and reaches a busy one at its next
@@ -170,8 +171,8 @@ label depends on the kind:
   `session_mail_send` to the sender's full id sends it.
 - A reply's label names the requests it answers and, when its status is not
   `done`, says it is not an answer. A reply to a request also says the user
-  made that request, typing it with `/mailbox` or through an extension such as
-  `delegate`, since only the user makes requests.
+  made that request through an extension such as `delegate`, since only the
+  user makes requests.
 
 The label is built from fields any process running as you can write: the
 envelope's `id`, `status` and the ids in `in_reply_to`, and the sender's name
@@ -250,11 +251,10 @@ are refused before anything is written once the count has reached the limit (5
 unless `session-mail.json` says otherwise; see
 [Configuration](#configuration)). The refusal says that a person typing in
 either session starts the count again. Automatic answers carry the count and
-are never refused. Requests from `/mailbox` carry 0 and are never refused:
-their sender acts for the user. A `message:send` emitted while the session is
-idle carries 0 too. One emitted during a run carries that run's count and is
-not refused at send time; the session that receives it counts it like any
-other mail, so a chain that reaches the limit is refused there as a loop.
+are never refused. A `message:send` is never refused at send time: its consumer
+acts for the user. Emitted while the session is idle it carries 0; during a run
+it carries that run's count, and the session that receives it counts it like
+any other mail, so a chain that reaches the limit is refused there as a loop.
 The limit is a loop guard, not a security boundary: a hand-written envelope
 can claim any `hops`.
 
@@ -273,11 +273,10 @@ copies of sent requests in `sent/` go too, not only the empty `new/`. Only real
 folders named like an address are considered; `running/`, symlinks and other
 names are left alone. The work runs after `session_start` returns.
 
-To clean up at once, type `/mailbox prune`. It applies the same rules without
+To clean up at once, type `/mailbox:prune`. It applies the same rules without
 the age limit, so it removes the folder (with its `cur/` and `sent/`) of every
 closed session with no unread mail, including one that closed a minute ago. It
 reports `Removed <N> mailbox folders of closed sessions`.
-`/mailbox prune <text>` is still a message to a session named `prune`.
 
 ## Configuration
 
@@ -463,7 +462,8 @@ root, and other extensions depend on its hooks, so these are stable:
   and a reply's statuses (`done`, `stopped`, `failed`); see
   [Envelopes](#envelopes).
 - The names of the tools (`session_mail_list`, `session_mail_send`,
-  `session_mail_ask`, `session_mail_reply`) and of the `/mailbox` command.
+  `session_mail_ask`, `session_mail_reply`) and of the `/mailbox`,
+  `/mailbox:send` and `/mailbox:prune` commands.
 - The keys of `session-mail.json`, today `hopLimit` and `pruneAfterDays`.
 
 Changing any of them needs a major version from 1.0 on, and a minor version

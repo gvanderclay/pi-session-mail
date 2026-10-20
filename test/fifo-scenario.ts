@@ -19,7 +19,7 @@ const b = session(newId("b"));
 try {
 	await a.start();
 	await b.start();
-	await a.mailbox(`${b.id} question`);
+	await a.request(b.id, "question");
 	const [request] = envelopes(a.id, "sent");
 	if (kind === "cur") execFileSync("mkfifo", [join(box(b.id, "cur"), "000000000000001-fifo.json")]);
 	if (kind === "sent") execFileSync("mkfifo", [join(box(a.id, "sent"), `000000000000000-${request.id}.json`)]);

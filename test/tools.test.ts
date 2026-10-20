@@ -221,119 +221,7 @@ test("with no records the list says no session is running", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Resolving `to` through /mailbox
-
-test("/mailbox <name> <text> writes a request to that session's address", async () => {
-	const a = session(newId());
-	const b = session(newId(), { name: "bravo" });
-	await a.start();
-	await b.start();
-	b.drop(true);
-	await a.mailbox("bravo please look");
-	const [request] = envelopes(a.id, "sent");
-	assert.equal(request.to, b.id);
-	assert.equal(request.kind, "request");
-	assert.equal(request.body, "please look");
-	assert.deepEqual(a.errors, []);
-	await a.shutdown();
-	await b.shutdown();
-});
-
-test("a short id of 8 or more characters resolves a running session", async () => {
-	const a = session(newId());
-	const b = session(newId());
-	await a.start();
-	await b.start();
-	b.drop(true);
-	await a.mailbox(`${b.id.slice(0, 8)} short`);
-	await a.mailbox(`${b.id.slice(0, 13)} longer`);
-	assert.deepEqual(
-		envelopes(a.id, "sent").map((e) => [e.to, e.body]),
-		[
-			[b.id, "short"],
-			[b.id, "longer"],
-		],
-	);
-	assert.deepEqual(a.errors, []);
-	await a.shutdown();
-	await b.shutdown();
-});
-
-test("a full id reaches a closed session", async () => {
-	const a = session(newId());
-	await a.start();
-	const closed = newId();
-	await a.mailbox(`${closed} for later`);
-	assert.equal(files(closed, "new").length, 1);
-	assert.deepEqual(a.errors, []);
-	await a.shutdown();
-});
-
-test("an exact name wins over an id prefix", async () => {
-	const a = session(newId());
-	const b = session(newId());
-	await a.start();
-	await b.start();
-	const c = session(newId(), { name: b.id.slice(0, 8) });
-	await c.start();
-	c.drop(true);
-	await a.mailbox(`${b.id.slice(0, 8)} which one`);
-	assert.equal(envelopes(a.id, "sent")[0].to, c.id);
-	await Promise.all([a.shutdown(), b.shutdown(), c.shutdown()]);
-});
-
-test("an ambiguous name is refused, naming every candidate, and nothing is sent", async () => {
-	const a = session(newId());
-	const b = session(newId(), { name: "twin" });
-	const c = session(newId(), { name: "twin" });
-	await a.start();
-	await b.start();
-	await c.start();
-	await a.mailbox("twin hello");
-	assert.equal(a.errors.length, 1);
-	assert.match(a.errors[0], /"twin" matches several running sessions/);
-	assert.ok(a.errors[0].includes(`twin (${b.id})`), a.errors[0]);
-	assert.ok(a.errors[0].includes(`twin (${c.id})`), a.errors[0]);
-	assert.deepEqual(files(a.id, "sent"), []);
-	await Promise.all([a.shutdown(), b.shutdown(), c.shutdown()]);
-});
-
-test("a short id shared by two sessions is refused, naming both", async () => {
-	const a = session(newId());
-	await a.start();
-	const [x, y] = twins();
-	plantRecord(x, { pid: process.pid });
-	plantRecord(y, { pid: process.pid, name: "why" });
-	await a.mailbox(`${x.slice(0, 8)} hello`);
-	assert.equal(a.errors.length, 1);
-	assert.ok(a.errors[0].includes(`${x.slice(0, 8)} (${x})`), a.errors[0]);
-	assert.ok(a.errors[0].includes(`why (${y})`), a.errors[0]);
-	assert.deepEqual(files(a.id, "sent"), []);
-	await a.shutdown();
-});
-
-test("an unknown name is refused with a note that a closed session needs its full id", async () => {
-	const a = session(newId());
-	await a.start();
-	await a.mailbox("nobody hello");
-	await a.mailbox("abc hello");
-	assert.equal(a.errors.length, 2);
-	assert.match(a.errors[0], /no running session is named "nobody".*a closed session is reached by its full id/);
-	assert.match(a.errors[1], /at least 8 characters/);
-	assert.deepEqual(files(a.id, "sent"), []);
-	await a.shutdown();
-});
-
-test("a session cannot send to itself by id, short id or name", async () => {
-	const a = session(newId(), { name: "me" });
-	await a.start();
-	for (const to of [a.id, a.id.slice(0, 8), "me"]) await a.mailbox(`${to} hello`);
-	assert.equal(a.errors.length, 3);
-	for (const error of a.errors) assert.match(error, /cannot send mail to itself/);
-	assert.deepEqual(files(a.id, "sent"), []);
-	assert.deepEqual(files(a.id, "new"), []);
-	await a.shutdown();
-});
+// Addressing
 
 test("/mailbox with no arguments shows the address and the name, or the short id others see", async () => {
 	const a = session(newId(), { name: "planner" });
@@ -405,7 +293,7 @@ test("a message gets no answer at settle while a request in the same run still d
 	await a.start();
 	await b.start();
 	await a.toolCall("session_mail_send", { to: b.id, message: "fyi" });
-	await a.mailbox(`${b.id} a question`);
+	await a.request(b.id, "a question");
 	await until(() => b.sent.length === 2, "both to be injected");
 	assert.equal(diskCounts(a.id).awaiting, 1);
 	await b.answer("the answer");
@@ -444,16 +332,84 @@ test("session_mail_send refuses an empty text, an unknown or ambiguous to, and t
 	await assert.rejects(a.toolCall("session_mail_send", { to: b.id, message: "   " }), /empty/);
 	await assert.rejects(
 		a.toolCall("session_mail_send", { to: "nobody", message: "hi" }),
-		/no running session is named "nobody"/,
+		/no running session is named "nobody".*a closed session is reached by its full id/,
 	);
+	await assert.rejects(a.toolCall("session_mail_send", { to: "abc", message: "hi" }), /at least 8 characters/);
 	await assert.rejects(
 		a.toolCall("session_mail_send", { to: "twin", message: "hi" }),
 		/matches several running sessions/,
 	);
-	await assert.rejects(a.toolCall("session_mail_send", { to: "me", message: "hi" }), /cannot send mail to itself/);
+	for (const to of [a.id, a.id.slice(0, 8), "me"])
+		await assert.rejects(a.toolCall("session_mail_send", { to, message: "hi" }), /cannot send mail to itself/);
 	assert.deepEqual(files(a.id, "sent"), []);
 	assert.deepEqual(files(b.id, "new"), []);
 	await Promise.all([a.shutdown(), b.shutdown(), c.shutdown()]);
+});
+
+// ---------------------------------------------------------------------------
+// Resolving `to` through session_mail_send
+
+test("session_mail_send resolves a short id of 8 or more characters", async () => {
+	const a = session(newId());
+	const b = session(newId());
+	await a.start();
+	await b.start();
+	b.drop(true);
+	await a.toolCall("session_mail_send", { to: b.id.slice(0, 8), message: "short" });
+	await a.toolCall("session_mail_send", { to: b.id.slice(0, 13), message: "longer" });
+	assert.deepEqual(
+		envelopes(a.id, "sent").map((e) => [e.kind, e.to, e.body]),
+		[
+			["message", b.id, "short"],
+			["message", b.id, "longer"],
+		],
+	);
+	await Promise.all([a.shutdown(), b.shutdown()]);
+});
+
+test("session_mail_send resolves an exact name before an id prefix", async () => {
+	const a = session(newId());
+	const b = session(newId());
+	await a.start();
+	await b.start();
+	const c = session(newId(), { name: b.id.slice(0, 8) });
+	await c.start();
+	c.drop(true);
+	await a.toolCall("session_mail_send", { to: b.id.slice(0, 8), message: "which one" });
+	assert.equal(envelopes(a.id, "sent")[0].to, c.id);
+	await Promise.all([a.shutdown(), b.shutdown(), c.shutdown()]);
+});
+
+test("session_mail_send refuses an ambiguous name, naming every candidate, and nothing is sent", async () => {
+	const a = session(newId());
+	const b = session(newId(), { name: "twin" });
+	const c = session(newId(), { name: "twin" });
+	await a.start();
+	await b.start();
+	await c.start();
+	await assert.rejects(a.toolCall("session_mail_send", { to: "twin", message: "hi" }), (err: Error) => {
+		assert.match(err.message, /"twin" matches several running sessions/);
+		assert.ok(err.message.includes(`twin (${b.id})`), err.message);
+		assert.ok(err.message.includes(`twin (${c.id})`), err.message);
+		return true;
+	});
+	assert.deepEqual(files(a.id, "sent"), []);
+	await Promise.all([a.shutdown(), b.shutdown(), c.shutdown()]);
+});
+
+test("session_mail_send refuses a short id shared by two sessions, naming both", async () => {
+	const a = session(newId());
+	await a.start();
+	const [x, y] = twins();
+	plantRecord(x, { pid: process.pid });
+	plantRecord(y, { pid: process.pid, name: "why" });
+	await assert.rejects(a.toolCall("session_mail_send", { to: x.slice(0, 8), message: "hi" }), (err: Error) => {
+		assert.ok(err.message.includes(`${x.slice(0, 8)} (${x})`), err.message);
+		assert.ok(err.message.includes(`why (${y})`), err.message);
+		return true;
+	});
+	assert.deepEqual(files(a.id, "sent"), []);
+	await a.shutdown();
 });
 
 // ---------------------------------------------------------------------------
@@ -948,7 +904,7 @@ test("a reply mid-run answers the ask before the answerer settles, and settle se
 
 test("with a request and an ask from one sender, the reply answers only the ask and settle only the request", async () => {
 	const { a, b } = await pair();
-	await a.mailbox(`${b.id} a request`);
+	await a.request(b.id, "a request");
 	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "an ask" });
 	await until(() => b.sent.length === 2, "both to be injected");
 	const sent = envelopes(a.id, "sent");
@@ -973,7 +929,7 @@ test("with a request and an ask from one sender, the reply answers only the ask 
 
 test("session_mail_reply refuses a second reply, a request, a message, an unknown id and an empty text, sending nothing", async () => {
 	const { a, b } = await pair();
-	await a.mailbox(`${b.id} a request`);
+	await a.request(b.id, "a request");
 	await a.toolCall("session_mail_send", { to: "bravo", message: "a message" });
 	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "an ask" });
 	await until(() => b.sent.length === 3, "all three to be injected");

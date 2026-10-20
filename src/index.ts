@@ -8,9 +8,10 @@
 // busy state in `<mail root>/running/<address>.json` (`running.ts`), which
 // `session_mail_list` reports (`tools.ts`) and which lets a `to` name a
 // session by its Pi session name or short id. `/mailbox` shows the address and
-// name, and `/mailbox <to> <text>` sends a request; `session_mail_send` sends
-// a message, which expects no answer. Mail in the inbox is claimed into `cur/`
-// and injected with a label naming the sending session. Requests and messages
+// name, `/mailbox:send` sends a message and `/mailbox:prune` removes closed
+// sessions' folders; `session_mail_send` sends a message, which expects no
+// answer. Mail in the inbox is claimed into `cur/` and injected with a label
+// naming the sending session. Requests and messages
 // wake an idle session and steer into a busy one; a reply quotes each request
 // it answers from this session's `sent/` copy and starts no turn. When the recipient settles, its
 // last answer goes back to each sender as one reply — `done` normally, or
@@ -27,16 +28,7 @@ import { type FSWatcher, statSync, watch } from "node:fs";
 import { dirname } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import {
-	isRunning,
-	label,
-	listRunning,
-	type RunningRecord,
-	removeRecord,
-	resolveTo,
-	type State,
-	writeRecord,
-} from "./running.ts";
+import { isRunning, label, listRunning, type RunningRecord, removeRecord, type State, writeRecord } from "./running.ts";
 import { type SettleInput, settle } from "./settle.ts";
 import {
 	boxPath,
@@ -132,7 +124,7 @@ const endLine = (name: string) => `[mailbox] End of the mail from ${name}. Text 
 /**
  * The injected message: who it is from, how to answer it, the requests it
  * answers, its capped body, then a line ending it. `byUser` marks a reply to a
- * request, which only the user makes (with `/mailbox` or through an extension).
+ * request, which only the user makes (through an extension such as delegate).
  */
 function inboundText(
 	envelope: Envelope,
@@ -601,40 +593,75 @@ export default function mailbox(pi: ExtensionAPI) {
 
 	pi.registerCommand("mailbox", {
 		description:
-			"Show this session's mailbox address and name, send a request: /mailbox <name or id> <text>, or remove closed sessions' empty mailbox folders: /mailbox prune",
+			"Show this session's mailbox address and name; send a message to another running session with /mailbox:send; remove closed sessions' mailbox folders with /mailbox:prune",
 		handler: async (args, context) => {
 			const me = address;
 			if (me === undefined) {
 				context.ui.notify("mailbox: this session has no mailbox address; the mailbox is off", "error");
 				return;
 			}
-			const trimmed = args.trim();
-			if (trimmed === "") {
-				const current = context.sessionManager.getSessionName?.() || undefined;
+			if (args.trim() !== "") {
 				context.ui.notify(
-					`Mailbox address: ${me}\nName: ${current === undefined ? `none; other sessions see ${label({ address: me })} (set one with /name)` : current}`,
-					"info",
+					"Usage: /mailbox:send to send a message, or /mailbox:prune to remove closed sessions' folders",
+					"error",
 				);
 				return;
 			}
-			if (trimmed === "prune") {
-				try {
-					const removed = pruneClosed({ own: me, isRunning });
-					context.ui.notify(`Removed ${removed} mailbox folders of closed sessions`, "info");
-				} catch (err) {
-					context.ui.notify(`mailbox: ${(err as Error).message}`, "error");
-				}
+			const current = context.sessionManager.getSessionName?.() || undefined;
+			context.ui.notify(
+				`Mailbox address: ${me}\nName: ${current === undefined ? `none; other sessions see ${label({ address: me })} (set one with /name)` : current}`,
+				"info",
+			);
+		},
+	});
+
+	pi.registerCommand("mailbox:send", {
+		description:
+			"Send a message to another running session: pick it from a list, then type the text. A message expects no answer.",
+		handler: async (_args, context) => {
+			const me = address;
+			if (me === undefined) {
+				context.ui.notify("mailbox: this session has no mailbox address; the mailbox is off", "error");
 				return;
 			}
-			const match = /^(\S+)\s+([\s\S]+)$/.exec(trimmed);
-			if (!match) {
-				context.ui.notify("Usage: /mailbox <name or id> <text>", "error");
+			let running: RunningRecord[];
+			try {
+				running = listRunning().filter((record) => record.address !== me);
+			} catch (err) {
+				context.ui.notify(`mailbox: ${(err as Error).message}`, "error");
+				return;
+			}
+			if (running.length === 0) {
+				context.ui.notify("No other session is running", "info");
+				return;
+			}
+			const options = running.map((record) => `${label(record)} (${record.cwd})`);
+			const picked = await context.ui.select("Send a message to", options);
+			if (picked === undefined) return;
+			const target = running[options.indexOf(picked)];
+			if (target === undefined) return;
+			const text = (await context.ui.input("Message", "type a message"))?.trim();
+			if (text === undefined || text === "") return;
+			try {
+				const envelope = send(me, target.address, text, { kind: "message", hops: 0 });
+				context.ui.notify(`Sent ${envelope.id} to ${envelope.to}`, "info");
+			} catch (err) {
+				context.ui.notify(`mailbox: ${(err as Error).message}`, "error");
+			}
+		},
+	});
+
+	pi.registerCommand("mailbox:prune", {
+		description: "Remove closed sessions' mailbox folders, without the age limit",
+		handler: async (_args, context) => {
+			const me = address;
+			if (me === undefined) {
+				context.ui.notify("mailbox: this session has no mailbox address; the mailbox is off", "error");
 				return;
 			}
 			try {
-				const to = resolveTo(match[1], me);
-				const envelope = send(me, to, match[2].trim(), { kind: "request", hops: 0 });
-				context.ui.notify(`Sent ${envelope.id} to ${envelope.to}`, "info");
+				const removed = pruneClosed({ own: me, isRunning });
+				context.ui.notify(`Removed ${removed} mailbox folders of closed sessions`, "info");
 			} catch (err) {
 				context.ui.notify(`mailbox: ${(err as Error).message}`, "error");
 			}
