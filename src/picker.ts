@@ -26,6 +26,9 @@ const FILTERS: readonly PickerFilter[] = ["unread", "awaiting", "read", "sent", 
 /** The most rows shown at once; `SelectList` scrolls the rest. */
 const ROW_MAX = 10;
 
+/** Room for a row's status prefix and its first line before the description column. */
+const ROW_LAYOUT = { minPrimaryColumnWidth: 32, maxPrimaryColumnWidth: 50 };
+
 const EMPTY: Record<PickerFilter, string> = {
 	unread: "No unread mail",
 	awaiting: "Nothing is waiting for a reply",
@@ -54,8 +57,8 @@ export type Peer = { label: string; running: boolean };
 /** Everything the picker needs, all known before it opens. */
 export type PickerOptions = {
 	items: readonly PickerItem[];
-	/** The label and running state of an address, for a row's other party. */
-	peer: (address: string) => Peer;
+	/** The label and running state of each address, snapshotted before the picker opens. */
+	peers: ReadonlyMap<string, Peer>;
 	/** The session's name (or short id) and short address; the filter is shown after it. */
 	title: string;
 	/** The current time in ms, for relative times. */
@@ -118,21 +121,28 @@ function shows(filter: PickerFilter, status: Status): boolean {
 
 const newestFirst = (a: PickerItem, b: PickerItem): number => b.ts.localeCompare(a.ts) || a.id.localeCompare(b.id);
 
-function row(item: PickerItem, peer: (address: string) => Peer, now: number, filter: PickerFilter): SelectItem {
+/** A peer from the snapshot; an address the handler did not resolve is named by its short id. */
+const peerOf = (peers: ReadonlyMap<string, Peer>, address: string): Peer =>
+	peers.get(address) ?? { label: address.slice(0, 8), running: false };
+
+function row(item: PickerItem, peers: ReadonlyMap<string, Peer>, now: number, filter: PickerFilter): SelectItem {
 	const sent = item.box === "sent";
-	const other = peer(sent ? item.to : item.from);
-	const parts = [`${sent ? "to" : "from"} ${oneLine(other.label)}`, item.kind, ago(item.ts, now)];
-	if (filter === "all" || filter === "sent") parts.push(item.status);
-	if (item.status === "awaiting") parts.push(other.running ? "running" : "closed");
-	return { value: item.id, label: firstLine(item.body), description: parts.join(" · ") };
+	const other = peerOf(peers, sent ? item.to : item.from);
+	// SelectList drops descriptions at narrow widths, so required markers go in the label too.
+	const markers: string[] = [];
+	if (filter === "all" || filter === "sent") markers.push(item.status);
+	if (item.status === "awaiting") markers.push(other.running ? "running" : "closed");
+	const parts = [`${sent ? "to" : "from"} ${oneLine(other.label)}`, item.kind, ago(item.ts, now), ...markers];
+	const prefix = markers.length > 0 ? `[${markers.join(" ")}] ` : "";
+	return { value: item.id, label: `${prefix}${firstLine(item.body)}`, description: parts.join(" · ") };
 }
 
 /** The detail screen: the other session, the kind, id, absolute time, what it answers and the whole body. */
-function detailText(item: PickerItem, peer: (address: string) => Peer): string {
+function detailText(item: PickerItem, peers: ReadonlyMap<string, Peer>): string {
 	const sent = item.box === "sent";
 	const address = sent ? item.to : item.from;
 	const lines = [
-		`${sent ? "To" : "From"} ${oneLine(peer(address).label)} <${address}>`,
+		`${sent ? "To" : "From"} ${oneLine(peerOf(peers, address).label)} <${address}>`,
 		`Kind ${oneLine(item.kind)}`,
 		`Id ${oneLine(item.id)}`,
 		`Sent ${new Date(item.ts).toLocaleString()}`,
@@ -155,9 +165,10 @@ export function picker(options: PickerOptions) {
 		const build = (selectedId: string | undefined, selectedIndex: number): void => {
 			shown = options.items.filter((item) => shows(filter, item.status)).sort(newestFirst);
 			list = new SelectList(
-				shown.map((item) => row(item, options.peer, options.now, filter)),
+				shown.map((item) => row(item, options.peers, options.now, filter)),
 				ROW_MAX,
 				listTheme(theme),
+				ROW_LAYOUT,
 			);
 			const found = selectedId === undefined ? -1 : shown.findIndex((item) => item.id === selectedId);
 			list.setSelectedIndex(found >= 0 ? found : Math.max(0, selectedIndex));
@@ -174,13 +185,13 @@ export function picker(options: PickerOptions) {
 
 		return {
 			render(width: number): string[] {
-				const title = `${options.title} · ${filter}`;
+				const title = oneLine(`${options.title} · ${filter}`);
 				const hint = screen === "detail" ? "esc back" : "s filter · enter open · esc close";
 				return [
 					...border.render(width),
 					...new Text(theme.fg("accent", theme.bold(title)), 0, 0).render(width),
 					...(screen === "detail" && detailItem !== undefined
-						? new Text(detailText(detailItem, options.peer), 0, 0).render(width)
+						? new Text(detailText(detailItem, options.peers), 0, 0).render(width)
 						: listLines(width)),
 					...new Text(theme.fg("dim", hint), 0, 0).render(width),
 					...border.render(width),

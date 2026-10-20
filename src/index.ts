@@ -38,7 +38,6 @@ import {
 	type Envelope,
 	ensureBoxes,
 	findSent,
-	type InboxFile,
 	isAddress,
 	listNew,
 	pruneClosed,
@@ -302,41 +301,46 @@ export default function mailbox(pi: ExtensionAPI) {
 	 * unread set, so the footer keeps saying the model has not seen that mail yet.
 	 */
 	async function openMailbox(me: string, context: ExtensionContext) {
-		let files: InboxFile[];
-		let records: RunningRecord[];
 		try {
-			files = readMailbox(me);
-			records = listRunning();
+			const files = readMailbox(me);
+			const unreadable = files.filter((file) => file.error !== undefined).length;
+			if (unreadable > 0) context.ui.notify(`mailbox: ${unreadable} files could not be read`, "warning");
+			const records = listRunning();
+			const items: PickerItem[] = [];
+			for (const file of mailStatus(files, unread)) {
+				const envelope = file.envelope;
+				if (envelope === undefined || file.status === undefined) continue;
+				items.push({
+					id: envelope.id,
+					box: file.box,
+					from: envelope.from,
+					to: envelope.to,
+					kind: envelope.kind,
+					inReplyTo: envelope.in_reply_to,
+					ts: envelope.ts,
+					body: envelope.body,
+					status: file.status,
+				});
+			}
+			const labels = new Map(records.map((record) => [record.address, label(record)]));
+			const running = new Set(records.map((record) => record.address));
+			const peers = new Map<string, Peer>();
+			for (const item of items)
+				for (const target of [item.from, item.to]) {
+					if (peers.has(target)) continue;
+					peers.set(target, {
+						label: labels.get(target) ?? label({ address: target }),
+						running: running.has(target),
+					});
+				}
+			const current = context.sessionManager.getSessionName?.() || undefined;
+			const short = me.slice(0, 8);
+			const title = `Mailbox · ${current === undefined ? short : `${current} · ${short}`}`;
+			const filter = items.some((item) => item.status === "unread") ? "unread" : "all";
+			await context.ui.custom<PickResult>(picker({ items, peers, title, now: Date.now(), filter }));
 		} catch (err) {
 			context.ui.notify(`mailbox: ${(err as Error).message}`, "error");
-			return;
 		}
-		const items: PickerItem[] = [];
-		for (const file of mailStatus(files, unread)) {
-			const envelope = file.envelope;
-			if (envelope === undefined || file.status === undefined) continue;
-			items.push({
-				id: envelope.id,
-				box: file.box,
-				from: envelope.from,
-				to: envelope.to,
-				kind: envelope.kind,
-				inReplyTo: envelope.in_reply_to,
-				ts: envelope.ts,
-				body: envelope.body,
-				status: file.status,
-			});
-		}
-		const labels = new Map(records.map((record) => [record.address, label(record)]));
-		const peer = (target: string): Peer => ({
-			label: labels.get(target) ?? label({ address: target }),
-			running: isRunning(target),
-		});
-		const current = context.sessionManager.getSessionName?.() || undefined;
-		const short = me.slice(0, 8);
-		const title = `Mailbox · ${current === undefined ? short : `${current} · ${short}`}`;
-		const filter = items.some((item) => item.status === "unread") ? "unread" : "all";
-		await context.ui.custom<PickResult>(picker({ items, peer, title, now: Date.now(), filter }));
 	}
 
 	/** A first scan deferred to the next event-loop turn; see `session_start`. */

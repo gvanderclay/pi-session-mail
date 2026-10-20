@@ -313,6 +313,50 @@ test("a message gets no answer at settle while a request in the same run still d
 	await b.shutdown();
 });
 
+test("diskCounts keeps the older awaiting rule for files the envelope reader rejects or normalises", () => {
+	const plant = (address: string, boxName: "cur" | "sent", name: string, value: unknown) => {
+		const dir = join(stateRoot(), address, boxName);
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		writeFileSync(join(dir, `${name}.json`), JSON.stringify(value));
+	};
+
+	// A bare sent object with a string id and a non-message kind: the old rule counts it.
+	const bare = newId();
+	plant(bare, "sent", "000000000000001-req", { id: "req", kind: "request" });
+	assert.deepEqual(diskCounts(bare), { unclaimed: 0, read: 0, awaiting: 1 });
+
+	// A valid envelope with a kind this version normalises to message still counts as the old raw kind did.
+	const future = newId();
+	plant(future, "sent", "000000000000001-future", {
+		id: "future",
+		from: newId(),
+		to: future,
+		kind: "shout",
+		hops: 0,
+		in_reply_to: [],
+		status: "",
+		ts: "",
+		body: "from the future",
+	});
+	assert.deepEqual(diskCounts(future), { unclaimed: 0, read: 0, awaiting: 1 });
+
+	// A partial cur object still answers the request its raw in_reply_to names.
+	const answered = newId();
+	plant(answered, "sent", "000000000000001-req", {
+		id: "req",
+		from: newId(),
+		to: answered,
+		kind: "request",
+		hops: 0,
+		in_reply_to: [],
+		status: "",
+		ts: "",
+		body: "still waiting?",
+	});
+	plant(answered, "cur", "000000000000002-reply", { id: "reply", in_reply_to: ["req"] });
+	assert.deepEqual(diskCounts(answered), { unclaimed: 0, read: 1, awaiting: 0 });
+});
+
 test("a message to a closed session's full id waits in its new/, and the result says so", async () => {
 	const a = session(newId());
 	await a.start();
