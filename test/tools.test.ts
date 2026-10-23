@@ -771,10 +771,56 @@ test("an ask gives up after 10 minutes, and a later answer arrives as a message 
 	await b.answer("finally, 42");
 	await until(() => a.sent.length === 1, "the late answer to be injected");
 	assert.deepEqual(a.sent[0].options, { triggerTurn: true, deliverAs: "steer" });
-	assert.match(a.sent[0].message.content, /answers an ask of yours that has stopped waiting/);
+	assert.match(a.sent[0].message.content, /answers an ask of yours that is not waiting for it/);
 	assert.match(a.sent[0].message.content, /finally, 42\n\n\[mailbox\] End of the mail from /);
 	// The model sent the ask, so its answer is not labelled as the user's request.
 	assert.doesNotMatch(a.sent[0].message.content, /The user made that request/);
+	await a.shutdown();
+	await b.shutdown();
+});
+
+// Bug caught: a watched parent's ask holds its turn, so the user cannot talk to it until the child answers.
+test("in a TUI session a person watches, an ask returns at once and the answer arrives as a message that starts a turn", async () => {
+	const a = session(newId(), { name: "alpha", mode: "tui" });
+	const b = session(newId(), { name: "bravo" });
+	await a.start();
+	await b.start();
+	const result = await a.toolCall("session_mail_ask", { to: "bravo", message: "more work" });
+	const details = result.details as AskDetails;
+	assert.equal(details.outcome, "background");
+	assert.deepEqual(result.structuredContent, result.details);
+	assert.match(result.content[0].text, /^Sent ask \S+ to bravo \(.*\)\. This session is not waiting/);
+	assert.equal(records().get(a.id)?.waitingOn, "");
+
+	await until(() => b.sent.length === 1, "the ask to be injected");
+	await b.answer("work done");
+	await until(() => a.sent.length === 1, "the answer to be injected");
+	assert.deepEqual(a.sent[0].options, { triggerTurn: true, deliverAs: "steer" });
+	assert.match(a.sent[0].message.content, /answers an ask of yours that is not waiting for it/);
+	assert.ok(a.sent[0].message.content.includes(`reply to your request ${details.id}`));
+	assert.match(a.sent[0].message.content, /work done\n\n\[mailbox\] End of the mail from /);
+	await a.shutdown();
+	await b.shutdown();
+});
+
+// Bug caught: a delegate (a TUI marked unattended) that stops waiting ends its turn, and its settle reports the question as its result.
+test("in a TUI session marked PI_UNATTENDED=1, an ask still waits for its answer", async (t) => {
+	process.env.PI_UNATTENDED = "1";
+	t.after(() => {
+		delete process.env.PI_UNATTENDED;
+	});
+	const a = session(newId(), { name: "alpha", mode: "tui" });
+	const b = session(newId(), { name: "bravo" });
+	await a.start();
+	await b.start();
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "which seam?" });
+	await until(() => records().get(a.id)?.waitingOn === b.id, "the wait to be recorded");
+	await until(() => b.sent.length === 1, "the ask to be injected");
+	await b.answer("the public one");
+	const result = await asked;
+	assert.equal((result.details as AskDetails).outcome, "answered");
+	assert.match(result.content[0].text, /the public one$/);
+	assert.equal(a.sent.length, 0, "the answer is the result, not a message");
 	await a.shutdown();
 	await b.shutdown();
 });

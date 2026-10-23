@@ -131,7 +131,7 @@ The model gets four tools:
 | Tool | Parameters | What it does |
 | --- | --- | --- |
 | `session_mail_list` | none | Lists every running session, in every agent directory: its name (or short id, the first 8 characters of its id, when it has no name), full id, working directory, idle or busy state and whom it is waiting on, and marks the calling session. |
-| `session_mail_ask` | `to`, `message` | Writes an ask (`kind: "ask"`) and waits for the answer, which is the result: its status and body, labelled as not an answer when the status is `stopped` or `failed`. The wait ends when the answer arrives, after 10 minutes ("no answer yet"), when the target's running record disappears ("stopped running"), or when the user stops the run; `waitingOn` is set while it waits and cleared in every case. Refused at once, writing nothing, when another ask of this session is waiting, when the target is not running, when the target is waiting on this session, at the [hop limit](#hop-limit), and when `to` does not resolve, is ambiguous or is this session. |
+| `session_mail_ask` | `to`, `message` | Writes an ask (`kind: "ask"`). In a TUI session without `PI_UNATTENDED=1` it returns at once with outcome `background`, sets no `waitingOn`, and the answer arrives as a message. Everywhere else (print, JSON and RPC modes, and a TUI marked unattended, such as a pi-squire delegate) it waits for the answer, which is the result: its status and body, labelled as not an answer when the status is `stopped` or `failed`. The wait ends when the answer arrives, after 10 minutes ("no answer yet"), when the target's running record disappears ("stopped running"), or when the user stops the run; `waitingOn` is set while it waits and cleared in every case. Refused at once, writing nothing, when another ask of this session is waiting, when the target is not running, when the target is waiting on this session, at the [hop limit](#hop-limit), and when `to` does not resolve, is ambiguous or is this session. |
 | `session_mail_reply` | `ask`, `message` | Answers one open ask this session received, at once, with status `done` and the turn's hop count, without ending the run; the asker's `session_mail_ask` returns with it. The answer at settle then leaves that ask out, while the sender's other requests and asks are still answered. Refused, sending nothing, for an ask already answered (by this tool or at settle), for a request (answered at settle), a message or a reply, for an id that never reached this session, and for an empty text. |
 | `session_mail_send` | `to`, `message` | Writes a message (`kind: "message"`) and returns its id. To a running session it is delivered at once; to a closed session, by full id, it waits in that session's inbox and the result says so. Refused when `to` does not resolve, is ambiguous or is this session, when the text is empty, and at the [hop limit](#hop-limit). |
 
@@ -168,9 +168,12 @@ listener takes it over, as pi-squire's `delegate` does for its tasks.
 
 A reply to this session's waiting ask goes to the waiting tool call as its
 result: it is neither injected nor emitted on `message:inbound`. A reply to an
-ask that is no longer waiting (it timed out, the user stopped it, or the
-session restarted) is delivered like a message: it starts a turn, and its label
-says the ask stopped waiting.
+ask that is not waiting (a background ask, or one that timed out, that the
+user stopped, or whose session restarted) is delivered like a message: it
+starts a turn, and its label says the ask is not waiting for it. An
+unattended session waits rather than asking in the background because ending
+its turn ends its work: a delegate's settle is its result, and print mode
+exits.
 
 Every injected message opens with a neutral label: `[mailbox] From <name>
 (<full id>, working in <cwd>), another Pi session on this machine.` The short

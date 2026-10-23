@@ -5,8 +5,11 @@
 // `session_mail_list` reports every running Pi session on this machine, in
 // every agent directory, and marks the calling one. `session_mail_send` leaves a plain
 // message, which wakes or steers its recipient and expects no answer.
-// `session_mail_ask` leaves an ask and waits, one at a time, for the answer,
-// which comes back as its result rather than as a message.
+// `session_mail_ask` leaves an ask. In a session a person is watching it
+// returns at once and the answer arrives as a message; elsewhere it waits, one
+// at a time, for the answer, which comes back as its result. An unattended
+// session must wait because ending its turn ends its work: a delegate's settle
+// is its result, and print mode exits.
 // `session_mail_reply` answers an ask this session received, mid-run; the asks
 // this session owes, and the kind of every envelope it has received, are kept
 // here for it. Mail a
@@ -53,8 +56,14 @@ const ASK_TIMEOUT_MS = 10 * 60 * 1000;
 /** How often a waiting ask checks that its target still runs. */
 const TARGET_CHECK_MS = 1000;
 
-/** How a waiting ask ended. */
+/** Whether a person is watching this session, so an ask need not hold its turn; `PI_UNATTENDED=1` marks a TUI nobody watches. */
+function attended(ctx: ExtensionContext): boolean {
+	return ctx.mode === "tui" && process.env.PI_UNATTENDED !== "1";
+}
+
+/** How an ask's tool call ended: at once in the background, or how its wait ended. */
 type AskOutcome =
+	| { outcome: "background" }
 	| { outcome: "answered"; status: string; body: string }
 	| { outcome: "timed-out" }
 	| { outcome: "stopped-running" }
@@ -66,6 +75,8 @@ type WaitingAsk = { id: string; to: string; finish: (outcome: AskOutcome) => voi
 function askText(ask: Envelope, target: string, outcome: AskOutcome): string {
 	const later = "A later answer arrives as a message.";
 	switch (outcome.outcome) {
+		case "background":
+			return `Sent ask ${ask.id} to ${target}. This session is not waiting: the answer arrives as a message and starts a turn on its own, so go on with other work or end your turn.`;
 		case "answered":
 			return outcome.status === "done"
 				? `${target} answered your ask ${ask.id}:\n\n${outcome.body}`
@@ -166,6 +177,7 @@ const AskResult = Type.Union([
 	Type.Object({ ...asked, outcome: Type.Literal("timed-out") }),
 	Type.Object({ ...asked, outcome: Type.Literal("stopped-running") }),
 	Type.Object({ ...asked, outcome: Type.Literal("stopped-by-user") }),
+	Type.Object({ ...asked, outcome: Type.Literal("background") }),
 ]);
 
 const ReplyResult = Type.Object({
@@ -292,14 +304,13 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 		name: "session_mail_ask",
 		label: "Session mail: ask",
 		description:
-			"Ask another running Pi session on this machine a question and wait for its answer, which comes back as this tool's result. The answer is the other session's final message when its run settles, or an earlier reply it sends. The wait ends after 10 minutes, when the other session stops running, or when the user stops it; a later answer then arrives as a message. Only one ask waits at a time, and a session that is waiting on this one cannot be asked. `to` is a running session's name, an id prefix of at least 8 characters, or a full session id; session_mail_list shows who is running. For a note that needs no answer, use session_mail_send.",
+			"Ask another running Pi session on this machine a question. The answer is the other session's final message when its run settles, or an earlier reply it sends. In a session a person is watching, the ask returns at once and the answer arrives later as a message that starts a turn. In an unattended session, such as a delegate, the ask waits up to 10 minutes and the answer comes back as this tool's result. `to` is a running session's name, an id prefix of at least 8 characters, or a full session id; session_mail_list shows who is running. For a note that needs no answer, use session_mail_send.",
 		parameters: Type.Object({
 			to: Type.String({
 				description: "The running session to ask: its name, an id prefix of 8+ characters, or its full session id.",
 			}),
 			message: Type.String({
-				description:
-					"The question. The recipient sees it labelled as coming from this session, with this session waiting.",
+				description: "The question. The recipient sees it labelled as coming from this session.",
 			}),
 		}),
 		outputSchema: AskResult,
@@ -332,26 +343,28 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 			const hops = hooks.hops();
 			checkHops(hops, hooks);
 			const ask = send(me, to, body, { kind: "ask", hops });
-			const outcome = await new Promise<AskOutcome>((resolve) => {
-				const finish = (result: AskOutcome) => {
-					if (waiting?.id !== ask.id) return;
-					waiting = undefined;
-					clearTimeout(timer);
-					clearInterval(check);
-					signal?.removeEventListener("abort", onAbort);
-					hooks.waitingOn("");
-					resolve(result);
-				};
-				const onAbort = () => finish({ outcome: "stopped-by-user" });
-				const timer = setTimeout(() => finish({ outcome: "timed-out" }), ASK_TIMEOUT_MS);
-				const check = setInterval(() => {
-					if (!listRunning().some((r) => r.address === to)) finish({ outcome: "stopped-running" });
-				}, TARGET_CHECK_MS);
-				waiting = { id: ask.id, to, finish };
-				hooks.waitingOn(to);
-				if (signal?.aborted) onAbort();
-				else signal?.addEventListener("abort", onAbort, { once: true });
-			});
+			const outcome: AskOutcome = attended(ctx)
+				? { outcome: "background" }
+				: await new Promise<AskOutcome>((resolve) => {
+						const finish = (result: AskOutcome) => {
+							if (waiting?.id !== ask.id) return;
+							waiting = undefined;
+							clearTimeout(timer);
+							clearInterval(check);
+							signal?.removeEventListener("abort", onAbort);
+							hooks.waitingOn("");
+							resolve(result);
+						};
+						const onAbort = () => finish({ outcome: "stopped-by-user" });
+						const timer = setTimeout(() => finish({ outcome: "timed-out" }), ASK_TIMEOUT_MS);
+						const check = setInterval(() => {
+							if (!listRunning().some((r) => r.address === to)) finish({ outcome: "stopped-running" });
+						}, TARGET_CHECK_MS);
+						waiting = { id: ask.id, to, finish };
+						hooks.waitingOn(to);
+						if (signal?.aborted) onAbort();
+						else signal?.addEventListener("abort", onAbort, { once: true });
+					});
 			const result = { id: ask.id, to, ...outcome };
 			return toolResult(askText(ask, target, outcome), result, result);
 		},
