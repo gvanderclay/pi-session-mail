@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-23
+
 ### Changed
 
 - `session_mail_ask` no longer holds the turn of a session a person is
@@ -186,7 +188,8 @@ author's dotfiles; the changes below are against that copy.
 - CI on Node 22.19 and 24: lint, typecheck, tests, and a check of the
   published file list.
 
-[Unreleased]: https://github.com/gvanderclay/pi-session-mail/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/gvanderclay/pi-session-mail/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/gvanderclay/pi-session-mail/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/gvanderclay/pi-session-mail/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/gvanderclay/pi-session-mail/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/gvanderclay/pi-session-mail/compare/v0.2.1...v0.2.2
