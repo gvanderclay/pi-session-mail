@@ -147,7 +147,7 @@ function inboundText(
 		header.push(
 			`It is waiting for your answer to its ask ${id}. Answer with session_mail_reply (ask ${id}); otherwise this run's last message is sent as the answer.`,
 		);
-	if (lateAnswer) header.push("It answers an ask of yours that has stopped waiting, so it arrives as a message.");
+	if (lateAnswer) header.push("It answers an ask of yours that is not waiting for it, so it arrives as a message.");
 	if (envelope.kind === "message")
 		header.push(`It expects no answer; if one is wanted, send it with session_mail_send to ${envelope.from}.`);
 	if (envelope.in_reply_to.length > 0)
@@ -388,7 +388,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		// The answer to a waiting ask is that tool call's result, and nothing else.
 		if (tools?.takeAnswer(envelope)) return;
 		const { requests, quotes } = requestQuotes(me, envelope.in_reply_to);
-		// An answer to an ask that stopped waiting is delivered like a message.
+		// An answer to an ask that is not waiting (a background ask, or one that stopped) is delivered like a message.
 		const lateAnswer = envelope.kind === "reply" && requests.some((copy) => copy.envelope.kind === "ask");
 		const wakes = envelope.kind !== "reply" || lateAnswer;
 		const byUser = envelope.kind === "reply" && requests.some((copy) => copy.envelope.kind === "request");

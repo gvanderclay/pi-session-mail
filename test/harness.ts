@@ -101,7 +101,10 @@ export type Dialog = {
 };
 
 /** One fake Pi session running the extension under `sessionId`. */
-export function session(sessionId: string, opts: { hasUI?: boolean; name?: string; cwd?: string } = {}) {
+export function session(
+	sessionId: string,
+	opts: { hasUI?: boolean; name?: string; cwd?: string; mode?: "tui" | "print" | "json" | "rpc" } = {},
+) {
 	const commands: Record<string, (args: string, ctx: unknown) => Promise<void>> = {};
 	const handlers: Record<string, Handler[]> = {};
 	const tools: Record<string, Tool> = {};
@@ -148,6 +151,7 @@ export function session(sessionId: string, opts: { hasUI?: boolean; name?: strin
 	const ctx = {
 		cwd: opts.cwd ?? dir,
 		hasUI: opts.hasUI ?? true,
+		mode: opts.mode,
 		isIdle: () => idle,
 		get signal() {
 			return signal;

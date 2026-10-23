@@ -6,6 +6,16 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `session_mail_ask` no longer holds the turn of a session a person is
+  watching (a TUI without `PI_UNATTENDED=1`): it returns at once with outcome
+  `background`, and the answer arrives as a message that starts a turn, so the
+  user can keep talking to the asker. Unattended sessions, such as delegates,
+  still wait for the answer. The label on an answer to an ask that is not
+  waiting now reads "is not waiting for it" instead of "has stopped waiting",
+  and the test pinning it changed with it.
+
 ## [0.4.0] - 2026-10-20
 
 ### Added
