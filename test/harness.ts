@@ -20,6 +20,10 @@ import { send } from "../src/store.ts";
 export const dir = mkdtempSync(join(tmpdir(), "mailbox-test-"));
 process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
 process.env.XDG_STATE_HOME = join(dir, "state");
+// A test run inside an unattended Pi session (such as a pi-squire delegate)
+// inherits PI_UNATTENDED=1, which would make the attended-ask test wait for
+// the 10-minute ask timeout. Tests that need it set it themselves.
+delete process.env.PI_UNATTENDED;
 after(() => rmSync(dir, { recursive: true, force: true }));
 
 /** The mail root under the current `XDG_STATE_HOME`. */
