@@ -22,7 +22,9 @@ follows [Semantic Versioning](https://semver.org/).
   other: it waits in a closed sender's inbox, and the sender gets it through
   `message:inbound` with its request copies. Asks are still answered with
   `session_mail_reply` or at settle. The README documents the hook with a
-  runnable request-to-reply example.
+  runnable request-to-reply example. It is how an extension answers a request
+  now that requests get no automatic answer (see the second **Breaking** entry
+  under Removed).
 
 ### Removed
 
@@ -45,9 +47,12 @@ follows [Semantic Versioning](https://semver.org/).
   keeps its `sent/` copy and shows in `/mailbox`. Its label no longer says the
   final answer goes back automatically, and `session_mail_reply` now refuses a
   request saying the extension that consumes it answers it. Asks are
-  unchanged. pi-squire's `delegate` relied on the automatic answer, so a
-  matching pi-squire update is required; mixing this release with an older
-  pi-squire is unsupported. The tests that pinned automatic request answers
+  unchanged. pi-squire's `delegate` relied on the automatic answer, so this
+  release and pi-squire must be upgraded together: the matching pi-squire
+  release sends its replies with `message:reply`. There is no version check,
+  capability negotiation or fallback answering, and mixing this release with
+  another pi-squire release is unsupported, with no particular failure
+  promised. The tests that pinned automatic request answers
   changed with it: they now pin that no answer is sent, and the reply-delivery
   tests write their replies directly.
 
