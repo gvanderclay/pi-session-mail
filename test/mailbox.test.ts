@@ -71,7 +71,7 @@ async function withFreshState(body: () => Promise<void>) {
 	}
 }
 
-test("/mailbox:send offers every other running session and writes a message with hops 0", () =>
+test("/mailbox:send offers every other running session and writes a message", () =>
 	withFreshState(async () => {
 		const a = session(newId(), { name: "alpha", cwd: "/work/a" });
 		const b = session(newId(), { name: "bravo", cwd: "/work/b" });
@@ -86,7 +86,7 @@ test("/mailbox:send offers every other running session and writes a message with
 		assert.equal(env.from, a.id);
 		assert.equal(env.to, b.id);
 		assert.equal(env.kind, "message");
-		assert.equal(env.hops, 0);
+		assert.equal("hops" in env, false);
 		assert.equal(env.body, "hello there");
 		assert.deepEqual(envelopes(a.id, "sent"), [env]);
 		assert.deepEqual(envelopes(c.id, "new"), []);
@@ -150,7 +150,7 @@ test("a request writes to the recipient's new/ and the sender's sent/", async ()
 	assert.equal(env.to, b);
 	assert.deepEqual(env.in_reply_to, []);
 	assert.equal(env.kind, "request");
-	assert.equal(env.hops, 0);
+	assert.equal("hops" in env, false);
 	assert.equal(env.status, "");
 	assert.equal(env.body, "hello there");
 	assert.match(env.id, /^[0-9a-f-]{36}$/);
@@ -286,9 +286,11 @@ test("a running session claims a message into cur/ and injects it once as labell
 		assert.equal(message.display, true);
 		assert.match(
 			message.content,
-			new RegExp(`^\\[mailbox\\] From \\S+ \\(${a.id}, working in [^)]+\\), another Pi session on this machine\\.`),
+			new RegExp(
+				`^\\[mailbox\\] From \\S+ \\(${a.id}, working in [^)]+\\), another Pi session on this machine\\.\\n\\n`,
+			),
 		);
-		assert.match(message.content, /final answer this turn goes back to it automatically/);
+		assert.doesNotMatch(message.content, /automatically|final answer/);
 		assert.ok(!/not from the user|untrusted|injection/.test(message.content), message.content);
 		assert.match(message.content, /what is 2 \+ 2\?\n\n\[mailbox\] End of the mail from /);
 		assert.deepEqual(files(b.id, "new"), []);
@@ -445,21 +447,25 @@ test("after session_shutdown nothing more is delivered", async () => {
 // ---------------------------------------------------------------------------
 // Replying
 
-test("a request is answered once the recipient settles, not at agent_end, and the reply reaches the sender", async () => {
+test("a request gets no automatic answer when the recipient settles, and a consumer's reply reaches the sender", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
 	await a.request(b.id, "what is 2 + 2?");
 	const [request] = envelopes(a.id, "sent");
 	await b.start();
+	assert.doesNotMatch(b.sent[0].message.content, /automatically|final answer/);
 	await b.agentEnd("It is 4.");
-	assert.deepEqual(files(a.id, "new"), []);
 	await b.settle();
+	assert.deepEqual(files(a.id, "new"), []);
+	const payload: { error?: string } = { to: a.id, inReplyTo: [request.id], body: "It is 4.", status: "done" } as never;
+	b.events.emit("message:reply", payload);
+	assert.equal(payload.error, undefined);
 	const [reply] = envelopes(a.id, "new");
 	assert.equal(reply.from, b.id);
 	assert.equal(reply.to, a.id);
 	assert.equal(reply.status, "done");
 	assert.equal(reply.kind, "reply");
-	assert.equal(reply.hops, 1); // the request (hop 0) started this turn
+	assert.equal("hops" in reply, false);
 	assert.deepEqual(reply.in_reply_to, [request.id]);
 	assert.equal(reply.body, "It is 4.");
 	assert.equal(files(b.id, "sent").length, 0);
@@ -472,13 +478,32 @@ test("a request is answered once the recipient settles, not at agent_end, and th
 	assert.match(a.sent[0].message.content, /It is 4\.\n\n\[mailbox\] End of the mail from /);
 });
 
-test("one reply per sender per settle lists every request it answers", async () => {
+test("an ask is answered once the recipient settles, not at agent_end, and the reply reaches the sender", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.ask(b.id, "what is 2 + 2?");
+	const [ask] = envelopes(a.id, "sent");
+	await b.start();
+	await b.agentEnd("It is 4.");
+	assert.deepEqual(files(a.id, "new"), []);
+	await b.settle();
+	const replies = envelopes(a.id, "new");
+	assert.equal(replies.length, 1);
+	assert.equal(replies[0].kind, "reply");
+	assert.equal(replies[0].from, b.id);
+	assert.equal(replies[0].status, "done");
+	assert.deepEqual(replies[0].in_reply_to, [ask.id]);
+	assert.equal(replies[0].body, "It is 4.");
+	await b.shutdown();
+});
+
+test("one reply per sender per settle lists every ask it answers", async () => {
 	const a = session(newId("a"));
 	const c = session(newId("c"));
 	const b = session(newId("b"));
-	await a.request(b.id, "one");
-	await a.request(b.id, "two");
-	await c.request(b.id, "three");
+	await a.ask(b.id, "one");
+	await a.ask(b.id, "two");
+	await c.ask(b.id, "three");
 	const aIds = envelopes(a.id, "sent").map((e) => e.id);
 	const cIds = envelopes(c.id, "sent").map((e) => e.id);
 	await b.start();
@@ -492,10 +517,10 @@ test("one reply per sender per settle lists every request it answers", async () 
 	assert.deepEqual(toC[0].in_reply_to, cIds);
 });
 
-test("a settle without an assistant answer still replies, with a placeholder", async () => {
+test("a settle without an assistant answer still answers an ask, with a placeholder", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.request(b.id, "hello");
+	await a.ask(b.id, "hello");
 	await b.start();
 	await b.answer();
 	await b.shutdown();
@@ -507,7 +532,9 @@ test("replies are never answered, and a settle with nothing pending sends nothin
 	const a = session(newId("a"));
 	const b = session(newId("b"));
 	await a.request(b.id, "ping");
+	const [request] = envelopes(a.id, "sent");
 	await b.start();
+	b.reply(a.id, [request.id], "pong");
 	await b.answer("pong");
 	await a.start();
 	assert.equal(a.sent.length, 1); // the reply
@@ -520,8 +547,8 @@ test("replies are never answered, and a settle with nothing pending sends nothin
 	assert.equal(files(a.id, "new").length, 0);
 });
 
-test("an envelope written before kind and hops is read as a request or a reply by in_reply_to, with hops 0", async () => {
-	type Inbound = { envelope: { kind: string; hops: number; in_reply_to: string[] } };
+test("an envelope written before kind is read as a request or a reply by in_reply_to", async () => {
+	type Inbound = { envelope: { kind: string; in_reply_to: string[] } };
 	const b = session(newId("b"));
 	const seen: Inbound[] = [];
 	b.events.on("message:inbound", (p) => void seen.push(p as Inbound));
@@ -543,15 +570,10 @@ test("an envelope written before kind and hops is read as a request or a reply b
 	await b.answer("answered");
 	await b.shutdown();
 	assert.deepEqual(
-		seen.map((p) => [p.envelope.kind, p.envelope.hops]),
-		[
-			["request", 0],
-			["reply", 0],
-		],
+		seen.map((p) => p.envelope.kind),
+		["request", "reply"],
 	);
-	const [reply] = envelopes(a, "new");
-	assert.deepEqual(reply.in_reply_to, ["old-request"]);
-	assert.equal(reply.kind, "reply");
+	assert.deepEqual(files(a, "new"), [], "a request gets no automatic answer");
 	assert.deepEqual(b.warnings, []);
 });
 
@@ -621,18 +643,21 @@ test("control characters in an id, a name and a working directory never start a 
 	}
 });
 
-test("an envelope with a bad hop count is set aside with a warning", async () => {
+test("an envelope with an invalid hops value is delivered like any other, the property ignored", async () => {
 	const b = session(newId("b"));
 	const a = newId("a");
 	mkdirSync(box(b.id, "new"), { recursive: true, mode: 0o700 });
-	const bad = (id: string, extra: object) =>
+	const old = (id: string, extra: object) =>
 		JSON.stringify({ id, from: a, to: b.id, in_reply_to: [], status: "", ts: "", body: "x", ...extra });
-	writeFileSync(join(box(b.id, "new"), "000000000000002-h.json"), bad("h", { kind: "request", hops: -1 }));
+	writeFileSync(join(box(b.id, "new"), "000000000000002-h.json"), old("h", { kind: "ask", hops: -1 }));
 	await b.start();
+	assert.equal(b.sent.length, 1);
+	await b.answer("answered");
 	await b.shutdown();
-	assert.equal(b.sent.length, 0);
-	assert.equal(b.warnings.length, 1);
-	assert.match(b.warnings[0], /invalid hops -1/);
+	assert.deepEqual(b.warnings, []);
+	const [reply] = envelopes(a, "new");
+	assert.deepEqual(reply.in_reply_to, ["h"]);
+	assert.equal("hops" in reply, false);
 });
 
 test("an envelope with an unknown kind is delivered as a message, waking the session and expecting no answer", async () => {
@@ -669,7 +694,7 @@ test("an envelope with an unknown kind is delivered as a message, waking the ses
 	assert.deepEqual(b.warnings, []);
 });
 
-test("a message:send emitted during a run carries the run's hops and is refused past the limit as a loop", async () => {
+test("a message:send is never refused for a chain of mail, and writes a request without hops, during a run or idle", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
 	await a.start();
@@ -684,49 +709,28 @@ test("a message:send emitted during a run carries the run's hops and is refused 
 			in_reply_to: [],
 			status: "",
 			ts: "",
-			body: "hop 4",
+			body: "from an older copy",
 			kind: "message",
-			hops: 4,
+			hops: 50,
 		}),
 	);
 	await until(() => a.sent.length === 1, "the message to be injected");
-	const payload: SendPayload = { to: b.id, body: "continue the chain" };
-	a.events.emit("message:send", payload);
-	assert.equal(payload.error, undefined);
-	assert.equal(payload.envelope?.hops, 5);
-	assert.equal(payload.envelope?.kind, "request");
+	const running: SendPayload = { to: b.id, body: "continue the chain" };
+	a.events.emit("message:send", running);
+	assert.equal(running.error, undefined);
+	assert.equal(running.envelope?.kind, "request");
+	assert.equal("hops" in (running.envelope ?? {}), false);
 	await b.start();
 	await b.agentStart();
 	await until(() => b.sent.length === 1, "the request to be injected");
-	await assert.rejects(b.toolCall("session_mail_send", { to: newId(), message: "again" }), /hop limit of 5/);
+	await b.toolCall("session_mail_send", { to: newId(), message: "again" });
+	await a.settle();
+	const idle: SendPayload = { to: b.id, body: "from the user" };
+	a.events.emit("message:send", idle);
+	assert.equal(idle.error, undefined);
+	assert.equal("hops" in (idle.envelope ?? {}), false);
 	await a.shutdown();
 	await b.shutdown();
-});
-
-test("a message:send emitted while idle carries hops 0 even when mail raised the count", async () => {
-	const a = session(newId("a"));
-	const b = newId("b");
-	mkdirSync(box(a.id, "new"), { recursive: true, mode: 0o700 });
-	writeFileSync(
-		join(box(a.id, "new"), "000000000000001-p.json"),
-		JSON.stringify({
-			id: "p",
-			from: newId(),
-			to: a.id,
-			in_reply_to: [],
-			status: "",
-			ts: "",
-			body: "hop 3",
-			kind: "message",
-			hops: 3,
-		}),
-	);
-	await a.start();
-	assert.equal(a.sent.length, 1); // woke the idle session, which has not started its run yet
-	const payload: SendPayload = { to: b, body: "from the user" };
-	a.events.emit("message:send", payload);
-	assert.equal(payload.envelope?.hops, 0);
-	await a.shutdown();
 });
 
 test("an envelope with an invalid from gets no reply", async () => {
@@ -745,13 +749,36 @@ test("an envelope with an invalid from gets no reply", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Unseen requests
+// No automatic answer to a request; unseen, stopped and failed asks
 
-test("a request dropped before it entered the conversation is answered failed, not done", async () => {
+test("a request gets no answer when its run stops, fails or never reads it, nor a held one on a later completed run", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
+	await a.request(b.id, "read, then stopped");
+	await b.start();
+	b.drop(true);
 	await a.request(b.id, "never read");
-	const [request] = envelopes(a.id, "sent");
+	await until(() => b.sent.length === 2, "B to receive the unread request");
+	await b.answer("partial", { aborted: true });
+	b.drop(false);
+	await a.request(b.id, "read, then stopped in a tool call");
+	await until(() => b.sent.length === 3, "B to receive the third request");
+	await b.stopInToolCall("Sleeping first.");
+	await a.request(b.id, "read, then failed");
+	await until(() => b.sent.length === 4, "B to receive the fourth request");
+	await b.failOnApiError("529 overloaded_error", "Reading first.");
+	await b.answer("finally");
+	await b.answer("a later run");
+	await b.shutdown();
+	assert.deepEqual(files(a.id, "new"), []);
+	assert.equal(files(a.id, "sent").length, 4, "each request keeps its sent/ copy");
+});
+
+test("an ask dropped before it entered the conversation is answered failed, not done", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	await a.ask(b.id, "never read");
+	const [ask] = envelopes(a.id, "sent");
 	b.drop(true);
 	await b.start();
 	assert.equal(b.sent.length, 1);
@@ -760,19 +787,19 @@ test("a request dropped before it entered the conversation is answered failed, n
 	const replies = envelopes(a.id, "new");
 	assert.equal(replies.length, 1);
 	assert.equal(replies[0].status, "failed");
-	assert.deepEqual(replies[0].in_reply_to, [request.id]);
+	assert.deepEqual(replies[0].in_reply_to, [ask.id]);
 	assert.match(replies[0].body, /stopped before it read the message/);
 });
 
-test("one sender with a seen and an unseen request in one settle gets a done reply and a failed reply", async () => {
+test("one sender with a seen and an unseen ask in one settle gets a done reply and a failed reply", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.request(b.id, "read this");
+	await a.ask(b.id, "read this");
 	await b.start();
-	await a.request(b.id, "dropped");
+	await a.ask(b.id, "dropped");
 	const [readId, droppedId] = envelopes(a.id, "sent").map((e) => e.id);
 	b.drop(true);
-	await until(() => b.sent.length === 2, "B to receive the second request");
+	await until(() => b.sent.length === 2, "B to receive the second ask");
 	await b.answer("answered the first");
 	await b.shutdown();
 	const replies = envelopes(a.id, "new");
@@ -784,15 +811,12 @@ test("one sender with a seen and an unseen request in one settle gets a done rep
 	assert.deepEqual(failed?.in_reply_to, [droppedId]);
 });
 
-test("a failed reply is injected with a header saying the request failed", async () => {
+test("a failed reply is injected with a header saying it failed", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
 	await a.request(b.id, "never read");
 	const [request] = envelopes(a.id, "sent");
-	b.drop(true);
-	await b.start();
-	await b.answer();
-	await b.shutdown();
+	b.reply(a.id, [request.id], "nothing was done", "failed");
 	await a.start();
 	await a.shutdown();
 	assert.equal(a.sent.length, 1);
@@ -802,96 +826,36 @@ test("a failed reply is injected with a header saying the request failed", async
 });
 
 // ---------------------------------------------------------------------------
-// Stopped runs, quoted requests, quiet replies
+// Stopped and failed runs, quoted requests, quiet replies
 
-test("a run the user stopped holds the request, and the next completed run answers it done, saying the user took over", async () => {
+test("a run the user stopped during a tool call answers an ask stopped, with the text before the stop", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.request(b.id, "do the thing");
-	const [request] = envelopes(a.id, "sent");
-	await b.start();
-	await b.answer("half of the answer", { aborted: true });
-	assert.deepEqual(envelopes(a.id, "new"), []);
-	await b.input("do it this way instead");
-	await b.answer("the steered answer");
-	const [reply] = envelopes(a.id, "new");
-	assert.equal(reply.status, "done");
-	assert.deepEqual(reply.in_reply_to, [request.id]);
-	assert.match(reply.body, /^\(The user stopped an earlier run partway and took over/);
-	assert.ok(reply.body.includes("the steered answer"), reply.body);
-	assert.ok(!reply.body.includes("half of the answer"), reply.body);
-	await a.start();
-	await a.shutdown();
-	await b.shutdown();
-	assert.equal(a.sent.length, 1);
-	assert.doesNotMatch(a.sent[0].message.content, /not "done"/);
-});
-
-test("a held request answered by a run with no text says the user took over and that there is no answer text", async () => {
-	const a = session(newId("a"));
-	const b = session(newId("b"));
-	await a.request(b.id, "do the thing");
-	await b.start();
-	await b.answer(undefined, { aborted: true });
-	assert.deepEqual(envelopes(a.id, "new"), []);
-	await b.answer(undefined);
-	const [reply] = envelopes(a.id, "new");
-	assert.equal(reply.status, "done");
-	assert.match(reply.body, /^\(The user stopped an earlier run partway and took over/);
-	assert.match(reply.body, /no answer text/);
-});
-
-test("a run the user stopped during a tool call holds the request, and the next completed run answers it", async () => {
-	const a = session(newId("a"));
-	const b = session(newId("b"));
-	await a.request(b.id, "do the thing");
+	await a.ask(b.id, "do the thing");
 	await b.start();
 	await b.stopInToolCall("Sleeping first.");
-	assert.deepEqual(envelopes(a.id, "new"), []);
-	await b.answer("done after all");
 	const [reply] = envelopes(a.id, "new");
-	assert.equal(reply.status, "done");
-	assert.match(reply.body, /^\(The user stopped an earlier run partway and took over/);
-	assert.ok(reply.body.includes("done after all"), reply.body);
-	assert.ok(!reply.body.includes("Sleeping first."), reply.body);
-});
-
-test("a request stays held through a second stop and a failed run, then gets one done reply", async () => {
-	const a = session(newId("a"));
-	const b = session(newId("b"));
-	await a.request(b.id, "do the thing");
-	const [request] = envelopes(a.id, "sent");
-	await b.start();
-	await b.answer("first try", { aborted: true });
-	await b.stopInToolCall("second try");
-	await b.failOnApiError("529 overloaded_error", "third try");
-	assert.deepEqual(envelopes(a.id, "new"), []);
-	await b.answer("finally");
-	const replies = envelopes(a.id, "new");
-	assert.equal(replies.length, 1);
-	assert.equal(replies[0].status, "done");
-	assert.deepEqual(replies[0].in_reply_to, [request.id]);
-	assert.match(replies[0].body, /^\(The user stopped an earlier run partway and took over/);
-	assert.ok(replies[0].body.includes("finally"), replies[0].body);
+	assert.equal(reply.status, "stopped");
+	assert.match(reply.body, /^\(The user stopped this run before it finished/);
+	assert.ok(reply.body.includes("Sleeping first."), reply.body);
 	await b.answer("a later run");
-	assert.equal(envelopes(a.id, "new").length, 1, "a held request is answered once");
+	assert.equal(envelopes(a.id, "new").length, 1, "an ask is answered once, never held");
 });
 
 test("a failed run with no stop before it still replies failed", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.request(b.id, "do the thing");
+	await a.ask(b.id, "do the thing");
 	await b.start();
 	await b.failOnApiError("529 overloaded_error");
 	const [reply] = envelopes(a.id, "new");
 	assert.equal(reply.status, "failed");
-	assert.doesNotMatch(reply.body, /took over/);
 });
 
 test("a run that ends on an API error replies failed with the error and the text before it", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.request(b.id, "do the thing");
+	await a.ask(b.id, "do the thing");
 	await b.start();
 	await b.failOnApiError("529 overloaded_error", "Reading first.");
 	const [reply] = envelopes(a.id, "new");
@@ -904,7 +868,7 @@ test("a run that ends on an API error replies failed with the error and the text
 test("a run that ends on an API error with no message or text still replies failed", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.request(b.id, "do the thing");
+	await a.ask(b.id, "do the thing");
 	await b.start();
 	await b.failOnApiError(undefined);
 	const [reply] = envelopes(a.id, "new");
@@ -913,22 +877,21 @@ test("a run that ends on an API error with no message or text still replies fail
 	assert.doesNotMatch(reply.body, /no answer/i);
 });
 
-test("a stopped run's unseen requests still get a failed reply, and its read ones are held", async () => {
+test("a stopped run's unseen asks get a failed reply, and its read ones a stopped reply", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
-	await a.request(b.id, "read this");
+	await a.ask(b.id, "read this");
 	await b.start();
-	await a.request(b.id, "dropped");
+	await a.ask(b.id, "dropped");
 	const [readId, droppedId] = envelopes(a.id, "sent").map((e) => e.id);
 	b.drop(true);
-	await until(() => b.sent.length === 2, "B to receive the second request");
+	await until(() => b.sent.length === 2, "B to receive the second ask");
 	await b.answer("partial", { aborted: true });
 	await b.shutdown();
 	const replies = envelopes(a.id, "new");
-	assert.equal(replies.length, 1);
-	assert.equal(replies[0].status, "failed");
-	assert.deepEqual(replies[0].in_reply_to, [droppedId]);
-	assert.ok(!replies.some((r) => r.in_reply_to.includes(readId)), "the read request is held");
+	assert.equal(replies.length, 2);
+	assert.deepEqual(replies.find((r) => r.status === "failed")?.in_reply_to, [droppedId]);
+	assert.deepEqual(replies.find((r) => r.status === "stopped")?.in_reply_to, [readId]);
 });
 
 test("an injected reply quotes every request it answers with its sent/ copy's path", async () => {
@@ -939,7 +902,7 @@ test("an injected reply quotes every request it answers with its sent/ copy's pa
 	const ids = envelopes(a.id, "sent").map((e) => e.id);
 	const copies = files(a.id, "sent");
 	await b.start();
-	await b.answer("both answered");
+	b.reply(a.id, ids, "both answered");
 	await a.start();
 	await a.shutdown();
 	await b.shutdown();
@@ -959,8 +922,9 @@ test("a request over 2 KiB is quoted cut on a character boundary, naming its cop
 	const long = `${"x".repeat(2 * 1024 - 1)}é${"y".repeat(500)}`;
 	await a.request(b.id, long);
 	const [copy] = files(a.id, "sent");
+	const [request] = envelopes(a.id, "sent");
 	await b.start();
-	await b.answer("short");
+	b.reply(a.id, [request.id], "short");
 	await a.start();
 	await a.shutdown();
 	await b.shutdown();
@@ -997,8 +961,9 @@ test("an injected reply does not trigger a turn; an injected request still does"
 	const a = session(newId("a"));
 	const b = session(newId("b"));
 	await a.request(b.id, "question");
+	const [request] = envelopes(a.id, "sent");
 	await b.start();
-	await b.answer("answer");
+	b.reply(a.id, [request.id], "answer");
 	await a.start();
 	await a.shutdown();
 	await b.shutdown();
@@ -1011,8 +976,9 @@ test("injected mail ends with a line closing it, so text after it reads as not t
 	const b = session(newId("b"), { name: "bravo" });
 	await b.start();
 	await a.request(b.id, "question");
+	const [request] = envelopes(a.id, "sent");
 	await until(() => b.sent.length === 1, "B to receive");
-	await b.answer("answer");
+	b.reply(a.id, [request.id], "answer");
 	await a.start();
 	await a.shutdown();
 	await b.shutdown();
@@ -1030,8 +996,9 @@ test("a quiet reply says the user made the request, with /mailbox or through an 
 	const a = session(newId("a"));
 	const b = session(newId("b"));
 	await a.request(b.id, "question");
+	const [request] = envelopes(a.id, "sent");
 	await b.start();
-	await b.answer("answer");
+	b.reply(a.id, [request.id], "answer");
 	await a.start();
 	await a.shutdown();
 	await b.shutdown();
@@ -1053,7 +1020,7 @@ test("a sent/ file whose name matches but whose envelope id differs is not quote
 	const decoy = { ...request, id: "33333333-3333-4333-8333-333333333333", body: "the decoy" };
 	writeFileSync(join(box(a.id, "sent"), `000000000000000-${request.id}.json`), JSON.stringify(decoy));
 	await b.start();
-	await b.answer("answer");
+	b.reply(a.id, [request.id], "answer");
 	await a.start();
 	await a.shutdown();
 	await b.shutdown();
@@ -1068,7 +1035,7 @@ test("a sent/ file whose name matches but whose envelope id differs is not quote
 type SendPayload = {
 	to: unknown;
 	body: unknown;
-	envelope?: { id: string; to: string; from: string; kind: string; hops: number };
+	envelope?: { id: string; to: string; from: string; kind: string };
 	error?: string;
 };
 
@@ -1136,7 +1103,7 @@ test("message:inbound sees every delivered envelope, replies with their in_reply
 	const [request] = envelopes(a.id, "sent");
 	const [requestCopy] = files(a.id, "sent");
 	await b.start();
-	await b.answer("pong");
+	b.reply(a.id, [request.id], "pong");
 	await a.start();
 	await a.shutdown();
 	await b.shutdown();
@@ -1155,13 +1122,27 @@ test("message:inbound sees every delivered envelope, replies with their in_reply
 	assert.equal(a.sent.length, 1);
 });
 
-test("a listener that sets handled stops the injection, but a request still gets its reply", async () => {
+test("a listener that sets handled stops the injection, and the request gets no automatic answer", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
 	b.events.on("message:inbound", (p) => {
 		(p as { handled: boolean }).handled = true;
 	});
 	await a.request(b.id, "handled elsewhere");
+	await b.start();
+	assert.equal(b.sent.length, 0);
+	await b.answer("the run's answer");
+	await b.shutdown();
+	assert.deepEqual(files(a.id, "new"), []);
+});
+
+test("a listener that sets handled on an ask still has it answered at settle", async () => {
+	const a = session(newId("a"));
+	const b = session(newId("b"));
+	b.events.on("message:inbound", (p) => {
+		(p as { handled: boolean }).handled = true;
+	});
+	await a.ask(b.id, "handled elsewhere");
 	await b.start();
 	assert.equal(b.sent.length, 0);
 	await b.answer("still answered");
@@ -1188,18 +1169,22 @@ test("the status counts mail until it enters the conversation, and hides at zero
 	await a.start();
 	await b.start();
 	try {
+		// b answers each request as the extension that consumes it would.
+		const answer = (body: string) => b.reply(a.id, [envelopes(a.id, "sent").at(-1).id], body);
 		// Mail that enters the conversation at once is never unread.
 		await a.request(b.id, "first");
 		assert.equal(a.status(), undefined);
 		await until(() => b.sent.length === 1, "B to receive the first");
 		assert.equal(b.status(), undefined);
 		await b.answer("one");
+		answer("one");
 		// Held back from the conversation, mail stays unread until the run settles.
 		b.drop(true);
 		await a.request(b.id, "second");
 		await until(() => b.sent.length === 2, "B to receive the second");
 		assert.equal(b.status(), "📬 1 unread");
 		await b.answer("two");
+		answer("two");
 		assert.equal(b.status(), undefined);
 		// A reply to an idle session is appended at once with no message_end; to a busy one it queues.
 		await until(() => a.sent.length === 2, "A to receive both replies");
@@ -1207,12 +1192,14 @@ test("the status counts mail until it enters the conversation, and hides at zero
 		await a.request(b.id, "third");
 		await until(() => b.sent.length === 3, "B to receive the third");
 		await b.answer("three");
+		answer("three");
 		await until(() => a.sent.length === 3, "A to receive the third reply");
 		assert.equal(a.status(), undefined);
 		await a.agentStart();
 		await a.request(b.id, "fourth");
 		await until(() => b.sent.length === 4, "B to receive the fourth");
 		await b.answer("four");
+		answer("four");
 		await until(() => a.sent.length === 4, "A to receive the fourth reply");
 		assert.equal(a.status(), "📬 1 unread");
 	} finally {
@@ -1238,8 +1225,9 @@ test("without a UI there is no status, and delivery still works", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"), { hasUI: false });
 	await a.request(b.id, "headless");
+	const [request] = envelopes(a.id, "sent");
 	await b.start();
-	await b.answer("ok");
+	b.reply(a.id, [request.id], "ok");
 	await b.shutdown();
 	assert.equal(b.sent.length, 1);
 	assert.equal(b.statusCalls(), 0);
@@ -1440,11 +1428,11 @@ test("a reply that fails at settle warns, naming the recipient", { skip: root0 }
 			status: "",
 			ts: "",
 			body: "q",
-			kind: "request",
+			kind: "ask",
 			hops: 0,
 		}),
 	);
-	await until(() => a.sent.length === 1, "A to receive the request");
+	await until(() => a.sent.length === 1, "A to receive the ask");
 	const newBox = box(b, "new");
 	chmodSync(newBox, 0o500);
 	try {

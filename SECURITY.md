@@ -25,9 +25,8 @@ the files involved.
 
 - Mail forged by a process running as the same user. It can already write to
   the mail root and to the session files directly.
-- The hop limit. It stops two models from waking each other forever; it is a
-  loop guard, not a security boundary, and a hand-written envelope can claim
-  any `hops`.
+- Loops of mail. Nothing limits how long two sessions can keep waking each
+  other; that is accepted, not a vulnerability.
 - What a model does with mail it receives. A message is untrusted input that
   is injected into the session; the session's own permissions decide what the
   model can then do.

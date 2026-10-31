@@ -253,7 +253,7 @@ test("a message to an idle session starts a turn by steering, labelled with the 
 	const result = await a.toolCall("session_mail_send", { to: "bravo", message: "  heads up  " });
 	const [message] = envelopes(a.id, "sent");
 	assert.equal(message.kind, "message");
-	assert.equal(message.hops, 0);
+	assert.equal("hops" in message, false);
 	assert.equal(message.to, b.id);
 	assert.equal(message.body, "heads up");
 	assert.equal(
@@ -294,7 +294,7 @@ test("a message to a busy session is steered in, not queued as a follow-up", asy
 	await b.shutdown();
 });
 
-test("a message gets no answer at settle while a request in the same run still does, and never counts as awaiting", async () => {
+test("neither a message nor a request gets an answer at settle, and a message never counts as awaiting", async () => {
 	const a = session(newId());
 	const b = session(newId());
 	await a.start();
@@ -305,10 +305,8 @@ test("a message gets no answer at settle while a request in the same run still d
 	assert.equal(diskCounts(a.id).awaiting, 1);
 	await b.answer("the answer");
 	const answers = envelopes(a.id, "new").concat(envelopes(a.id, "cur"));
-	assert.equal(answers.length, 1);
-	const request = envelopes(a.id, "sent").find((e) => e.kind === "request");
-	assert.deepEqual(answers[0].in_reply_to, [request.id]);
-	assert.equal(answers[0].body, "the answer");
+	assert.equal(answers.length, 0);
+	assert.equal(diskCounts(a.id).awaiting, 1);
 	await a.shutdown();
 	await b.shutdown();
 });
@@ -464,134 +462,103 @@ test("session_mail_send refuses a short id shared by two sessions, naming both",
 });
 
 // ---------------------------------------------------------------------------
-// Hop limit
+// No hop limit
 
 let planted = 0;
-/** An envelope written by hand into `to`'s new/, as a session at hop count `hops` would send it. */
-function plant(to: string, from: string, hops: number, kind = "message") {
+/** An envelope written by hand into `to`'s new/, as an older copy would write it, with `extra` fields added. */
+function plant(to: string, from: string, extra: Record<string, unknown> = {}, kind = "message") {
 	mkdirSync(join(stateRoot(), to, "new"), { recursive: true, mode: 0o700 });
 	const id = `planted-${++planted}`;
 	const name = `${String(planted).padStart(15, "0")}-${id}.json`;
 	writeFileSync(
 		join(stateRoot(), to, "new", name),
-		JSON.stringify({ id, from, to, kind, hops, in_reply_to: [], status: "", ts: "", body: `at hop ${hops}` }),
+		JSON.stringify({ id, from, to, kind, in_reply_to: [], status: "", ts: "", body: `planted ${planted}`, ...extra }),
 	);
 	return id;
 }
 
-/** The hops `session_mail_send` stamps when `s` sends now. */
-async function stampedHops(s: ReturnType<typeof session>, to: string): Promise<number> {
-	const result = await s.toolCall("session_mail_send", { to, message: "next" });
-	const id = (result.details as { id: string }).id;
-	return envelopes(to, "new")
-		.concat(envelopes(to, "cur"))
-		.find((e) => e.id === id).hops;
-}
-
-test("a message raises the recipient's count to its hops + 1, which its next send stamps", async () => {
-	const b = session(newId());
-	await b.start();
+test("messages and asks are never refused, however many the session has received and sent", async () => {
+	const { a, b } = await pair();
 	await b.agentStart();
-	plant(b.id, newId(), 2);
-	await until(() => b.sent.length === 1, "the message to be injected");
-	assert.equal(await stampedHops(b, newId()), 3);
-	await b.shutdown();
-});
-
-test("anything the user types resets the count to 0, even mid-turn", async () => {
-	const b = session(newId());
-	await b.start();
-	await b.agentStart();
-	plant(b.id, newId(), 3);
-	await until(() => b.sent.length === 1, "the message to be injected");
-	await b.input("over to me");
-	assert.equal(await stampedHops(b, newId()), 0);
-	await b.shutdown();
-});
-
-test("RPC input and a prompt a command sent reset the count too", async () => {
-	for (const source of ["rpc", "extension"] as const) {
-		const b = session(newId());
-		await b.start();
-		await b.agentStart();
-		plant(b.id, newId(), 3);
-		await until(() => b.sent.length === 1, "the message to be injected");
-		await b.input("from the user", source);
-		assert.equal(await stampedHops(b, newId()), 0, source);
-		await b.shutdown();
+	for (let i = 0; i < 12; i++) {
+		plant(b.id, a.id);
+		await until(() => b.sent.length === i + 1, `message ${i + 1} to be steered in`);
+		await b.toolCall("session_mail_send", { to: a.id, message: `back ${i}` });
 	}
-});
-
-test("a turn started by new mail counts from that mail, not from the turn before", async () => {
-	const b = session(newId());
-	await b.start();
-	await b.agentStart();
-	plant(b.id, newId(), 3);
-	await until(() => b.sent.length === 1, "the first message");
-	await b.settle();
-	plant(b.id, newId(), 0);
-	await until(() => b.sent.length === 2, "the second message");
-	await b.agentStart();
-	assert.equal(await stampedHops(b, newId()), 1);
+	const stop = new AbortController();
+	const asked = b.toolCall("session_mail_ask", { to: "alpha", message: "still allowed?" }, stop.signal);
+	stop.abort();
+	await asked;
+	assert.equal(envelopes(b.id, "sent").length, 13);
+	assert.deepEqual([...a.warnings, ...b.warnings], []);
+	await a.shutdown();
 	await b.shutdown();
 });
 
-test("mail steered into a turn the user started raises its count", async () => {
-	const b = session(newId());
-	await b.start();
-	await b.input("start working");
-	await b.agentStart();
-	plant(b.id, newId(), 1);
-	await until(() => b.sent.length === 1, "the message to be steered in");
-	assert.equal(await stampedHops(b, newId()), 2);
+test("a message and an ask pass between two sessions again and again", async () => {
+	const { a, b } = await pair();
+	for (let round = 0; round < 8; round++) {
+		await a.toolCall("session_mail_send", { to: "bravo", message: `ping ${round}` });
+		await until(() => b.sent.length === round + 1, `ping ${round} to be delivered`);
+		await b.toolCall("session_mail_send", { to: "alpha", message: `pong ${round}` });
+		await until(() => a.sent.length === round + 1, `pong ${round} to be delivered`);
+	}
+	for (let round = 0; round < 8; round++) {
+		const before = b.sent.length;
+		const stop = new AbortController();
+		const asked = a.toolCall("session_mail_ask", { to: "bravo", message: `ask ${round}` }, stop.signal);
+		await until(() => b.sent.length === before + 1, `ask ${round} to be delivered`);
+		const [ask] = envelopes(a.id, "sent").filter((e) => e.body === `ask ${round}`);
+		await b.toolCall("session_mail_reply", { ask: ask.id, message: `answer ${round}` });
+		await asked;
+	}
+	await a.shutdown();
 	await b.shutdown();
 });
 
-test("a reply a message:inbound listener takes over raises the count; one shown quietly does not", async () => {
-	const b = session(newId());
-	let takeOver = false;
-	b.events.on("message:inbound", (p) => {
-		(p as { handled: boolean }).handled = takeOver;
-	});
-	await b.start();
-	await b.agentStart();
-	plant(b.id, newId(), 3, "reply");
-	await until(() => b.sent.length === 1, "the quiet reply");
-	assert.equal(await stampedHops(b, newId()), 0);
-	takeOver = true;
-	plant(b.id, newId(), 2, "reply");
-	await until(() => files(b.id, "new").length === 0, "the reply to be claimed");
-	assert.equal(await stampedHops(b, newId()), 3);
-	await b.shutdown();
-});
-
-test("a send at the limit is refused before anything is written, and says typing starts the count again", async () => {
-	const b = session(newId());
-	await b.start();
-	await b.agentStart();
-	plant(b.id, newId(), 4);
-	await until(() => b.sent.length === 1, "the message to be injected");
-	const to = newId();
-	await assert.rejects(
-		b.toolCall("session_mail_send", { to, message: "one more" }),
-		/hop limit of 5[\s\S]*a person typing in either session starts the count again/i,
-	);
-	assert.deepEqual(files(b.id, "sent"), []);
-	assert.deepEqual(files(to, "new"), []);
-	await b.shutdown();
-});
-
-test("the automatic answer to a request is sent even at the limit, carrying the count", async () => {
+test("an envelope with a hops property from an older copy is read, delivered and answered like any other", async () => {
 	const b = session(newId());
 	const asker = newId();
 	await b.start();
-	plant(b.id, asker, 4, "request");
-	await until(() => b.sent.length === 1, "the request to be injected");
-	await b.answer("still answered");
+	plant(b.id, asker, { hops: 40 }, "ask");
+	await until(() => b.sent.length === 1, "the ask to be injected");
+	assert.match(b.sent[0].message.content, /planted \d+/);
+	await b.answer("answered");
 	const [reply] = envelopes(asker, "new");
 	assert.equal(reply.kind, "reply");
-	assert.equal(reply.hops, 5);
-	assert.equal(reply.body, "still answered");
+	assert.equal(reply.body, "answered");
+	assert.equal("hops" in reply, false);
+	for (const hops of [-1, 2.5, "many", null]) {
+		const before = b.sent.length;
+		plant(b.id, asker, { hops });
+		await until(() => b.sent.length === before + 1, `a message with hops ${JSON.stringify(hops)} to be injected`);
+	}
+	assert.deepEqual(b.warnings, []);
+	await b.shutdown();
+});
+
+test("new envelopes carry no hops field, whoever writes them", async () => {
+	const { a, b } = await pair();
+	await a.toolCall("session_mail_send", { to: "bravo", message: "a message" });
+	const stop = new AbortController();
+	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "an ask" }, stop.signal);
+	await until(() => b.sent.length === 2, "both to be delivered");
+	const ask = envelopes(a.id, "sent").find((e) => e.kind === "ask");
+	await b.toolCall("session_mail_reply", { ask: ask.id, message: "mid-run answer" });
+	await asked;
+	await a.request(b.id, "a request");
+	await until(() => b.sent.length === 3, "the request to be delivered");
+	b.reply(a.id, [envelopes(a.id, "sent").find((e) => e.kind === "request").id], "a consumer's answer");
+	const all = [
+		...envelopes(a.id, "sent"),
+		...envelopes(a.id, "new"),
+		...envelopes(a.id, "cur"),
+		...envelopes(b.id, "new"),
+		...envelopes(b.id, "cur"),
+	];
+	assert.deepEqual(new Set(all.map((e) => e.kind)), new Set(["message", "ask", "request", "reply"]));
+	for (const envelope of all) assert.equal("hops" in envelope, false, `${envelope.kind} carries hops`);
+	await a.shutdown();
 	await b.shutdown();
 });
 
@@ -611,63 +578,40 @@ async function withConfig(text: string | undefined, body: () => Promise<void>) {
 	}
 }
 
-/** A session at hop count `count`, from a planted message. */
-async function atHops(count: number) {
+/** A session that has started and received one message. */
+async function startedSession() {
 	const s = session(newId());
 	await s.start();
 	await s.agentStart();
-	plant(s.id, newId(), count - 1);
+	plant(s.id, newId());
 	await until(() => s.sent.length === 1, "the message to be injected");
 	return s;
 }
 
-test("session-mail.json sets the hop limit, read at each send", async () => {
-	await withConfig(JSON.stringify({ hopLimit: 2 }), async () => {
-		const s = await atHops(1);
-		await s.toolCall("session_mail_send", { to: newId(), message: "at 1" });
-		plant(s.id, newId(), 1);
-		await until(() => s.sent.length === 2, "the second message");
-		await assert.rejects(s.toolCall("session_mail_send", { to: newId(), message: "at 2" }), /hop limit of 2/);
-		writeFileSync(
-			join(process.env.PI_CODING_AGENT_DIR as string, "session-mail.json"),
-			JSON.stringify({ hopLimit: 3 }),
-		);
-		await s.toolCall("session_mail_send", { to: newId(), message: "at 2, limit 3" });
+test("a hopLimit in session-mail.json has no effect and draws no warning", async () => {
+	await withConfig(JSON.stringify({ hopLimit: 1, pruneAfterDays: 7 }), async () => {
+		const s = await startedSession();
+		for (let i = 0; i < 4; i++) {
+			plant(s.id, newId());
+			await until(() => s.sent.length === i + 2, "another message");
+			await s.toolCall("session_mail_send", { to: newId(), message: `send ${i}` });
+		}
 		assert.deepEqual(s.warnings, []);
 		await s.shutdown();
 	});
 });
 
-test("without session-mail.json the hop limit is 5, with no warning", async () => {
-	await withConfig(undefined, async () => {
-		const s = await atHops(4);
-		await s.toolCall("session_mail_send", { to: newId(), message: "at 4" });
+test("a session-mail.json that is not an object means 30 days, with exactly one warning", async () => {
+	await withConfig("[2]", async () => {
+		const s = await startedSession();
+		await until(() => s.warnings.length > 0, "the prune at session start to read the settings");
+		await s.toolCall("session_mail_send", { to: newId(), message: "first" });
+		assert.equal(s.warnings.length, 1);
+		assert.match(s.warnings[0], /session-mail\.json[\s\S]*30/);
+		assert.doesNotMatch(s.warnings[0], /hop/i);
 		await s.shutdown();
-		const t = await atHops(5);
-		await assert.rejects(t.toolCall("session_mail_send", { to: newId(), message: "at 5" }), /hop limit of 5/);
-		assert.deepEqual([...s.warnings, ...t.warnings], []);
-		await t.shutdown();
 	});
 });
-
-for (const [what, text] of [
-	["not JSON", "{ hopLimit: 2"],
-	["a zero hopLimit", JSON.stringify({ hopLimit: 0 })],
-	["a fractional hopLimit", JSON.stringify({ hopLimit: 2.5 })],
-	["a string hopLimit", JSON.stringify({ hopLimit: "2" })],
-	["not an object", "[2]"],
-] as const) {
-	test(`a session-mail.json that is ${what} means 5, with exactly one warning across two sends`, async () => {
-		await withConfig(text, async () => {
-			const s = await atHops(4);
-			await s.toolCall("session_mail_send", { to: newId(), message: "first" });
-			await s.toolCall("session_mail_send", { to: newId(), message: "second" });
-			assert.equal(s.warnings.length, 1);
-			assert.match(s.warnings[0], /session-mail\.json[\s\S]*5/);
-			await s.shutdown();
-		});
-	});
-}
 
 for (const [what, text] of [
 	["not JSON", "{ pruneAfterDays: 2"],
@@ -677,7 +621,7 @@ for (const [what, text] of [
 ] as const) {
 	test(`a session-mail.json that is ${what} means 30 days, with exactly one warning across the start and two sends`, async () => {
 		await withConfig(text, async () => {
-			const s = await atHops(1);
+			const s = await startedSession();
 			await until(() => s.warnings.length > 0, "the prune at session start to read the settings");
 			await s.toolCall("session_mail_send", { to: newId(), message: "first" });
 			await s.toolCall("session_mail_send", { to: newId(), message: "second" });
@@ -690,7 +634,7 @@ for (const [what, text] of [
 
 test("a valid pruneAfterDays gives no warning", async () => {
 	await withConfig(JSON.stringify({ pruneAfterDays: 7 }), async () => {
-		const s = await atHops(1);
+		const s = await startedSession();
 		await s.toolCall("session_mail_send", { to: newId(), message: "hi" });
 		assert.deepEqual(s.warnings, []);
 		await s.shutdown();
@@ -712,7 +656,7 @@ test("an ask is answered at the target's settle, and the answer is the tool resu
 	await until(() => b.sent.length === 1, "the ask to be injected");
 	const [ask] = envelopes(a.id, "sent");
 	assert.equal(ask.kind, "ask");
-	assert.equal(ask.hops, 0);
+	assert.equal("hops" in ask, false);
 	assert.equal(ask.body, "what is 6 x 7?");
 	await b.answer("42");
 	const result = await asked;
@@ -913,24 +857,18 @@ test("an ask to a session that is not running is refused, and so are this sessio
 	await b.shutdown();
 });
 
-test("an ask stamps the hop count and is refused at the limit", async () => {
+test("an ask is written without a hops field", async () => {
 	const { a, b } = await pair();
-	await a.agentStart();
-	plant(a.id, newId(), 4);
-	await until(() => a.sent.length === 1, "the message to be injected");
-	await assert.rejects(a.toolCall("session_mail_ask", { to: "bravo", message: "q" }), /hop limit of 5/);
-	assert.deepEqual(files(a.id, "sent"), []);
-	await a.input("carry on");
 	const stop = new AbortController();
 	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "q" }, stop.signal);
-	assert.equal(envelopes(a.id, "sent")[0].hops, 0);
+	assert.equal("hops" in envelopes(a.id, "sent")[0], false);
 	stop.abort();
 	await asked;
 	await a.shutdown();
 	await b.shutdown();
 });
 
-test("an ask reaches its target labelled as waiting, and arms an automatic answer that raises the count", async () => {
+test("an ask reaches its target labelled as waiting, and arms an automatic answer", async () => {
 	const { a, b } = await pair();
 	const inbound: string[] = [];
 	b.events.on("message:inbound", (p) => void inbound.push((p as { envelope: { kind: string } }).envelope.kind));
@@ -952,7 +890,7 @@ test("an ask reaches its target labelled as waiting, and arms an automatic answe
 	await asked;
 	const [answer] = envelopes(a.id, "cur");
 	assert.deepEqual(answer.in_reply_to, [ask.id]);
-	assert.equal(answer.hops, 1);
+	assert.equal("hops" in answer, false);
 	await a.shutdown();
 	await b.shutdown();
 });
@@ -980,14 +918,14 @@ test("a reply mid-run answers the ask before the answerer settles, and settle se
 	await until(() => b.sent.length === 1, "the ask to be injected");
 	const [ask] = envelopes(a.id, "sent");
 	await b.agentStart();
-	plant(b.id, newId(), 1); // the run's count is 2 when it replies
+	plant(b.id, newId());
 	await until(() => b.sent.length === 2, "a message to be steered in");
 	const replied = await b.toolCall("session_mail_reply", { ask: ask.id, message: "  right away  " });
 	const result = await asked;
 	assert.deepEqual(result.details, { id: ask.id, to: b.id, outcome: "answered", status: "done", body: "right away" });
 	const [answer] = envelopes(a.id, "cur");
 	assert.equal(answer.kind, "reply");
-	assert.equal(answer.hops, 2);
+	assert.equal("hops" in answer, false);
 	assert.deepEqual(answer.in_reply_to, [ask.id]);
 	assert.match(replied.content[0].text, new RegExp(`^Answered ask ${ask.id} from alpha`));
 	assert.deepEqual(replied.structuredContent, { id: answer.id, ask: ask.id, to: a.id });
@@ -999,13 +937,12 @@ test("a reply mid-run answers the ask before the answerer settles, and settle se
 	await b.shutdown();
 });
 
-test("with a request and an ask from one sender, the reply answers only the ask and settle only the request", async () => {
+test("with a request and an ask from one sender, the reply answers only the ask and settle answers neither", async () => {
 	const { a, b } = await pair();
 	await a.request(b.id, "a request");
 	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "an ask" });
 	await until(() => b.sent.length === 2, "both to be injected");
 	const sent = envelopes(a.id, "sent");
-	const request = sent.find((e) => e.kind === "request");
 	const ask = sent.find((e) => e.kind === "ask");
 	await b.agentStart();
 	await b.toolCall("session_mail_reply", { ask: ask.id, message: "the ask's answer" });
@@ -1014,11 +951,8 @@ test("with a request and an ask from one sender, the reply answers only the ask 
 	await b.settle();
 	const answers = envelopes(a.id, "new").concat(envelopes(a.id, "cur"));
 	assert.deepEqual(
-		answers.map((e) => [e.in_reply_to, e.body]).sort((x, y) => String(x[1]).localeCompare(String(y[1]))),
-		[
-			[[ask.id], "the ask's answer"],
-			[[request.id], "the run's answer"],
-		],
+		answers.map((e) => [e.in_reply_to, e.body]),
+		[[[ask.id], "the ask's answer"]],
 	);
 	await a.shutdown();
 	await b.shutdown();
@@ -1044,7 +978,7 @@ test("session_mail_reply refuses a second reply, a request, a message, an unknow
 	);
 	await assert.rejects(
 		b.toolCall("session_mail_reply", { ask: id("request"), message: "x" }),
-		/is a request, not an ask; nothing was sent\. A request is answered automatically when this run settles/,
+		/is a request, not an ask; nothing was sent\. A request is answered by the extension that consumes it, not by this tool/,
 	);
 	await assert.rejects(
 		b.toolCall("session_mail_reply", { ask: id("message"), message: "x" }),

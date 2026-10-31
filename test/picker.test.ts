@@ -26,10 +26,10 @@ async function mailInEveryState() {
 	me.drop(true);
 	await open.toolCall("session_mail_send", { to: me.id, message: "fresh mail" });
 	await until(() => me.status() === "📬 1 unread", "the footer to count the unread message");
-	// An answered request: `open` answers it at settle, and the reply arrives read.
-	me.request(open.id, "answered request");
+	// An answered request: `open` answers it as the extension that consumes it would, and the reply arrives read.
+	const answered = me.request(open.id, "answered request");
 	await until(() => open.sent.length === 1, "the answered request to arrive");
-	await open.answer("the answer");
+	open.reply(me.id, [answered.id], "the answer");
 	await until(() => me.sent.length === 2, "the answer to arrive");
 	// An awaiting request to a session still running, one to a session that then closes.
 	me.request(open.id, "running request");
@@ -188,11 +188,10 @@ test("Enter opens the detail screen, and Esc returns to the same row and filter"
 	const me = session(newId(), { name: "me" });
 	const peer = session(newId(), { name: "peer" });
 	await Promise.all([me.start(), peer.start()]);
-	me.request(peer.id, "the question");
+	const request = me.request(peer.id, "the question");
 	await until(() => peer.sent.length === 1, "the request to arrive");
-	await peer.answer("the answer");
+	peer.reply(me.id, [request.id], "the answer");
 	await until(() => me.sent.length === 1, "the reply to arrive");
-	const [request] = envelopes(me.id, "sent");
 	const [reply] = envelopes(me.id, "cur");
 	const { dialog, closed } = await openPicker(me);
 	try {
@@ -511,9 +510,9 @@ test("deleting a read reply also deletes the sent copy of the request it answere
 	const me = session(newId(), { name: "me" });
 	const peer = session(newId(), { name: "peer" });
 	await Promise.all([me.start(), peer.start()]);
-	me.request(peer.id, "the question");
+	const request = me.request(peer.id, "the question");
 	await until(() => peer.sent.length === 1, "the request to arrive");
-	await peer.answer("the answer");
+	peer.reply(me.id, [request.id], "the answer");
 	await until(() => me.sent.length === 1, "the reply to arrive");
 	assert.equal(envelopes(me.id, "sent").length, 1);
 	const { dialog, closed } = await openPicker(me);
@@ -541,9 +540,9 @@ test("d deletes a sent message and an answered request", async () => {
 	const peer = session(newId(), { name: "peer" });
 	await Promise.all([me.start(), peer.start()]);
 	await me.toolCall("session_mail_send", { to: peer.id, message: "a message" });
-	me.request(peer.id, "the request");
+	const request = me.request(peer.id, "the request");
 	await until(() => peer.sent.length === 2, "the request to arrive");
-	await peer.answer("the answer");
+	peer.reply(me.id, [request.id], "the answer");
 	await until(() => me.sent.length === 1, "the reply to arrive");
 	assert.equal(envelopes(me.id, "sent").length, 2, "sent/ holds the message and the request");
 	const { dialog, closed } = await openPicker(me);
@@ -592,8 +591,8 @@ test("a reply to a dropped request is still delivered, quoting the id alone", as
 		assert.ok(render(open).includes("drop me"));
 		open = await deleteSelected(me, open, true);
 		assert.deepEqual(envelopes(me.id, "sent"), [], "the sent copy is gone");
-		// The peer still owes the request, and its answer comes back after the copy is gone.
-		await peer.answer("after the drop");
+		// The peer's consumer still answers the request, after the copy is gone.
+		peer.reply(me.id, [request.id], "after the drop");
 		await until(() => me.sent.some((sent) => sent.message.content.includes("after the drop")), "the late reply");
 		const text = me.sent.find((sent) => sent.message.content.includes("after the drop"))?.message.content ?? "";
 		assert.ok(text.includes(`Your request ${request.id} has no copy in sent/; only its id is known.`), text);
@@ -649,9 +648,9 @@ test("an unreadable sent/ keeps a reply and its request copy and notifies", {
 	const me = session(newId(), { name: "me" });
 	const peer = session(newId(), { name: "peer" });
 	await Promise.all([me.start(), peer.start()]);
-	me.request(peer.id, "the question");
+	const request = me.request(peer.id, "the question");
 	await until(() => peer.sent.length === 1, "the request to arrive");
-	await peer.answer("the answer");
+	peer.reply(me.id, [request.id], "the answer");
 	await until(() => me.sent.length === 1, "the reply to arrive");
 	const sentBox = box(me.id, "sent");
 	const { dialog, closed } = await openPicker(me);

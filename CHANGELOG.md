@@ -6,6 +6,56 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The `message:reply` hook: an extension that took over a request answers it
+  by emitting `{ to, inReplyTo, body, status }`. `pi-session-mail` writes a
+  reply from the current session (the caller cannot set `from`) with that
+  body and status exactly as given, at once, without waiting for the run to
+  settle or using the model's answer, and sets `envelope` or `error` on the
+  payload before `emit` returns, as `message:send` does. `status` is
+  required and is `done`, `stopped` or `failed`; `inReplyTo` is a non-empty
+  list of at most 50 non-empty ids, checked for shape only and not looked up
+  in the mailbox; `body` is any string; `to` is checked as `message:send`
+  checks it. There is no duplicate guard: every valid call writes a reply.
+  With no provider installed, neither field is set. The reply travels like any
+  other: it waits in a closed sender's inbox, and the sender gets it through
+  `message:inbound` with its request copies. Asks are still answered with
+  `session_mail_reply` or at settle. The README documents the hook with a
+  runnable request-to-reply example. It is how an extension answers a request
+  now that requests get no automatic answer (see the second **Breaking** entry
+  under Removed).
+
+### Removed
+
+- **Breaking:** the hop limit is gone entirely. There is no per-turn hop
+  count, `hops` is no longer written to new envelopes or part of the
+  supported envelope, `session_mail_send` and `session_mail_ask` are never
+  refused because of hops, and the `hopLimit` setting in `session-mail.json`
+  has no effect (no migration; `pruneAfterDays` is unchanged). No other loop
+  guard replaces it: sessions can keep waking each other, which is accepted.
+  An old stored envelope with a `hops` property is still read and delivered;
+  the property is ignored. The test that pinned the old behaviour changed with
+  it.
+- **Breaking:** a request (mail another extension sends through
+  `message:send`) no longer gets an automatic answer. The receiving session
+  sends no reply when the run settles, whether a `message:inbound` listener
+  took the request over or not, and whether the run completed, stopped or
+  failed or never read the request; a request is no longer held across a stop
+  and answered "took over" later. The extension that consumes a request now
+  owns its reply. A request is still stored, delivered and woken on as before,
+  keeps its `sent/` copy and shows in `/mailbox`. Its label no longer says the
+  final answer goes back automatically, and `session_mail_reply` now refuses a
+  request saying the extension that consumes it answers it. Asks are
+  unchanged. pi-squire's `delegate` relied on the automatic answer, so this
+  release and pi-squire must be upgraded together: the matching pi-squire
+  release sends its replies with `message:reply`. There is no version check,
+  capability negotiation or fallback answering, and mixing this release with
+  another pi-squire release is unsupported, with no particular failure
+  promised. The tests that pinned automatic request answers
+  changed with it: they now pin that no answer is sent, and the reply-delivery
+  tests write their replies directly.
+
 ## [0.5.0] - 2026-10-23
 
 ### Changed

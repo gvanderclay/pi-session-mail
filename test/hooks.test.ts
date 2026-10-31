@@ -1,4 +1,4 @@
-// The `message:send` and `message:inbound` contracts, run from the worked
+// The `message:send`, `message:reply`, `message:inbound` and `message:scan` contracts, run from the worked
 // examples in `../README.md`. The examples are the documentation: every
 // `` ```js <name> `` fence is extracted and executed verbatim on a real
 // `createEventBus`, so a field renamed in the README without a matching
@@ -15,6 +15,7 @@ import { test } from "node:test";
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 
 import register from "../src/index.ts";
+import { send } from "../src/store.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "mailbox-hooks-"));
 process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
@@ -53,11 +54,17 @@ const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
 	...args: string[]
 ) => (...args: unknown[]) => Promise<void>;
 
-/** Run one README example with the names its prose promises: `pi`, `peer`, `bareBus`, `assert`. */
-async function runExample(name: string, scope: { pi: unknown; peer: string; bareBus: unknown }) {
+/** Run one README example with the names its prose promises: `pi`, `peer`, `bareBus`, `peerPi`, `assert`. */
+async function runExample(name: string, scope: { pi: unknown; peer: string; bareBus: unknown; peerPi?: unknown }) {
 	const code = examples.get(name);
 	assert.ok(code, `README.md has a \`\`\`js ${name} example`);
-	await new AsyncFunction("pi", "peer", "bareBus", "assert", code)(scope.pi, scope.peer, scope.bareBus, assert);
+	await new AsyncFunction("pi", "peer", "bareBus", "peerPi", "assert", code)(
+		scope.pi,
+		scope.peer,
+		scope.bareBus,
+		scope.peerPi,
+		assert,
+	);
 }
 
 type Sent = { message: { customType: string; content: string; display?: boolean }; options: unknown };
@@ -97,11 +104,8 @@ function session(sessionId: string) {
 		sent,
 		start: () => fire("session_start", { reason: "startup" }),
 		shutdown: () => fire("session_shutdown"),
-		/** One agent run ending with `text` as the last assistant message, then settling. */
-		answer: async (text: string) => {
-			await fire("agent_end", { messages: [{ role: "assistant", content: [{ type: "text", text }] }] });
-			await fire("agent_settled");
-		},
+		/** A `done` reply fixture written straight through `send()`; a consumer's real reply goes through `message:reply`. */
+		reply: (to: string, inReplyTo: string[], body: string) => send(sessionId, to, body, { kind: "reply", inReplyTo }),
 	};
 }
 
@@ -125,7 +129,7 @@ test("the README's message:send example writes a request the sender keeps a copy
 		assert.equal(envelope.to, b.id);
 		assert.equal(envelope.body, "Please run the test suite.");
 		assert.equal(envelope.kind, "request");
-		assert.equal(envelope.hops, 0);
+		assert.equal("hops" in envelope, false);
 		assert.deepEqual(envelopes(a.id, "sent"), [envelope]);
 	} finally {
 		await a.shutdown();
@@ -173,7 +177,9 @@ test("the README's message:inbound example takes over a reply, quoting its reque
 		const [request] = envelopes(s.id, "sent");
 		const [requestCopy] = files(s.id, "sent");
 		await until(() => r.sent.length === 1, "r to receive the request");
-		await r.answer("the answer");
+		const answer = { to: s.id, inReplyTo: [request.id], body: "the answer", status: "done" };
+		r.events.emit("message:reply", answer);
+		assert.equal((answer as { error?: string }).error, undefined);
 		await until(() => s.sent.length === 2, "the reply to be injected");
 		assert.deepEqual(
 			s.sent.map((m) => m.message.customType),
@@ -209,7 +215,8 @@ test("the README's message:scan example has a waiting reply emitted as message:i
 		await until(() => r.sent.length === 1, "r to receive the request");
 		// r's reply is on disk in s's inbox. Nothing below yields to the event
 		// loop, so s's watcher and poll timer cannot claim it before the scan.
-		await r.answer("the answer");
+		const [request] = envelopes(s.id, "sent");
+		r.reply(s.id, [request.id], "the answer");
 		assert.equal(files(s.id, "new").length, 1, "the reply is waiting");
 		await runExample("message:scan", { pi: s.pi, peer: r.id, bareBus: createEventBus() });
 		assert.equal(files(s.id, "new").length, 0, "the scan claimed it");
@@ -221,6 +228,34 @@ test("the README's message:scan example has a waiting reply emitted as message:i
 	}
 });
 
+test("the README's message:reply example answers a taken-over request, and the reply arrives unchanged", async () => {
+	const s = session(newId("s"));
+	const r = session(newId("r"));
+	await s.start();
+	await r.start();
+	try {
+		await runExample("message:reply", { pi: s.pi, peer: r.id, bareBus: createEventBus(), peerPi: r.pi });
+		const [request] = envelopes(s.id, "sent");
+		assert.equal(request.kind, "request");
+		assert.deepEqual(r.sent, [], "the consumer took the request over, so mailbox injected nothing");
+		assert.deepEqual(files(r.id, "sent"), [], "a reply keeps no sent/ copy");
+		assert.deepEqual(files(r.id, "new"), [], "the invalid reply wrote nothing");
+		assert.equal(s.sent.length, 1, "nothing took the reply over, so mailbox injected it");
+		assert.match(s.sent[0].message.content, new RegExp(`reply to your request ${request.id}`));
+		assert.match(s.sent[0].message.content, /All 42 tests pass\.\n\n\[mailbox\] End of the mail from /);
+		assert.deepEqual(s.sent[0].options, { deliverAs: "followUp" });
+	} finally {
+		await s.shutdown();
+		await r.shutdown();
+	}
+});
+
 test("every runnable example in the README has a runner above", () => {
-	assert.deepEqual([...examples.keys()].sort(), ["message:inbound", "message:scan", "message:send", "no-provider"]);
+	assert.deepEqual([...examples.keys()].sort(), [
+		"message:inbound",
+		"message:reply",
+		"message:scan",
+		"message:send",
+		"no-provider",
+	]);
 });

@@ -5,8 +5,10 @@ A file mailbox between Pi sessions on the same machine.
 Each Pi session gets an address and an inbox. You send a message to another
 running session with `/mailbox:send`, and the model lists, asks, answers and
 sends through four `session_mail_*` tools. Mail waits on disk until the
-recipient starts or resumes, and the recipient's final answer goes back to the
-sender automatically.
+recipient starts or resumes. An ask's answer goes back to its sender
+automatically; a request another extension sends through `message:send` gets
+no automatic answer, because the extension that consumes it owns its reply and
+sends it through `message:reply`.
 
 ## Install
 
@@ -60,9 +62,9 @@ and then typing the text:
 ```
 
 The sender sees `Sent <id> to <address>`. A message wakes the recipient's model
-and expects no answer. The model sends requests, asks and answers through the
-`session_mail_*` tools, and a request's last answer comes back to the sender as
-a reply when that run settles.
+and expects no answer. The model sends asks, messages and answers through the
+`session_mail_*` tools, and an ask's last answer comes back to the sender as a
+reply when that run settles.
 
 The footer shows `📬 N unread` while mail has reached this session but not yet
 entered its conversation, such as mail queued behind a busy run; it is hidden
@@ -95,18 +97,18 @@ quotes each request it answers, capped at 2 KiB each with the `sent/` copy's
 path, or the request's id alone when this session has no copy.
 
 When the recipient's agent settles, its last answer goes back to each sender as
-one reply listing the requests it answers. Each of the sender's asks not
-already answered with `session_mail_reply` gets a separate reply. The status is
-`done` normally, `stopped` when the user stopped the run (with the partial
-text), or `failed` when the run ended on an error (with the error and the
-partial text).
+one reply listing that sender's asks not already answered with
+`session_mail_reply`. The status is `done` normally, `stopped` when the user
+stopped the run (with the partial text), or `failed` when the run ended on an
+error (with the error and the partial text). An ask the session was stopped
+before reading gets a `failed` reply instead. The answer to an ask its sender
+is still waiting on becomes that sender's `session_mail_ask` result.
 
-A request is never answered `stopped`. When the user stops a run, the requests
-it read are held for the next run that completes, which answers them `done` and
-says the user took over (see [Delivery](#delivery)). A request the session was
-stopped before reading gets a `failed` reply instead. Replies and messages are
-never answered. The answer to an ask its sender is still waiting on becomes
-that sender's `session_mail_ask` result.
+A request gets no automatic answer: not when its run completes, stops or
+fails, not when the session never read it, and not when a `message:inbound`
+listener took it over. The extension that consumes it owns its reply, and
+sends it with the [`message:reply`](#messagereply) hook. Replies
+and messages are never answered.
 
 ## Running sessions
 
@@ -131,9 +133,9 @@ The model gets four tools:
 | Tool | Parameters | What it does |
 | --- | --- | --- |
 | `session_mail_list` | none | Lists every running session, in every agent directory: its name (or short id, the first 8 characters of its id, when it has no name), full id, working directory, idle or busy state and whom it is waiting on, and marks the calling session. |
-| `session_mail_ask` | `to`, `message` | Writes an ask (`kind: "ask"`). In a TUI session without `PI_UNATTENDED=1` it returns at once with outcome `background`, sets no `waitingOn`, and the answer arrives as a message. Everywhere else (print, JSON and RPC modes, and a TUI marked unattended, such as a pi-squire delegate) it waits for the answer, which is the result: its status and body, labelled as not an answer when the status is `stopped` or `failed`. The wait ends when the answer arrives, after 10 minutes ("no answer yet"), when the target's running record disappears ("stopped running"), or when the user stops the run; `waitingOn` is set while it waits and cleared in every case. Refused at once, writing nothing, when another ask of this session is waiting, when the target is not running, when the target is waiting on this session, at the [hop limit](#hop-limit), and when `to` does not resolve, is ambiguous or is this session. |
-| `session_mail_reply` | `ask`, `message` | Answers one open ask this session received, at once, with status `done` and the turn's hop count, without ending the run; the asker's `session_mail_ask` returns with it. The answer at settle then leaves that ask out, while the sender's other requests and asks are still answered. Refused, sending nothing, for an ask already answered (by this tool or at settle), for a request (answered at settle), a message or a reply, for an id that never reached this session, and for an empty text. |
-| `session_mail_send` | `to`, `message` | Writes a message (`kind: "message"`) and returns its id. To a running session it is delivered at once; to a closed session, by full id, it waits in that session's inbox and the result says so. Refused when `to` does not resolve, is ambiguous or is this session, when the text is empty, and at the [hop limit](#hop-limit). |
+| `session_mail_ask` | `to`, `message` | Writes an ask (`kind: "ask"`). In a TUI session without `PI_UNATTENDED=1` it returns at once with outcome `background`, sets no `waitingOn`, and the answer arrives as a message. Everywhere else (print, JSON and RPC modes, and a TUI marked unattended, such as a pi-squire delegate) it waits for the answer, which is the result: its status and body, labelled as not an answer when the status is `stopped` or `failed`. The wait ends when the answer arrives, after 10 minutes ("no answer yet"), when the target's running record disappears ("stopped running"), or when the user stops the run; `waitingOn` is set while it waits and cleared in every case. Refused at once, writing nothing, when another ask of this session is waiting, when the target is not running, when the target is waiting on this session, and when `to` does not resolve, is ambiguous or is this session. |
+| `session_mail_reply` | `ask`, `message` | Answers one open ask this session received, at once, with status `done`, without ending the run; the asker's `session_mail_ask` returns with it. The answer at settle then leaves that ask out, while the sender's other asks are still answered. Refused, sending nothing, for an ask already answered (by this tool or at settle), for a request (the extension that consumes it answers it), a message or a reply, for an id that never reached this session, and for an empty text. |
+| `session_mail_send` | `to`, `message` | Writes a message (`kind: "message"`) and returns its id. To a running session it is delivered at once; to a closed session, by full id, it waits in that session's inbox and the result says so. Refused when `to` does not resolve, is ambiguous or is this session, and when the text is empty. |
 
 ## Addressing
 
@@ -155,10 +157,10 @@ A `to` given to a tool resolves as follows:
 
 | Kind | Written by | Delivered as | Answered |
 | --- | --- | --- | --- |
-| `request` | `message:send` | `triggerTurn`, `deliverAs: "steer"` | yes, when a run completes; held while the user has taken over |
-| `ask` | `session_mail_ask` | `triggerTurn`, `deliverAs: "steer"` | yes, when the run settles |
+| `request` | `message:send` | `triggerTurn`, `deliverAs: "steer"` | never automatically; the extension that consumes it replies |
+| `ask` | `session_mail_ask` | `triggerTurn`, `deliverAs: "steer"` | yes, with `session_mail_reply` or when the run settles |
 | `message` | `session_mail_send`, `/mailbox:send` | `triggerTurn`, `deliverAs: "steer"` | never |
-| `reply` | the answering session | `deliverAs: "followUp"`, no turn; see below for answers to asks | never |
+| `reply` | the answering session: `session_mail_reply` or settle for an ask, `message:reply` for a request | `deliverAs: "followUp"`, no turn; see below for answers to asks | never |
 
 Mail for the model wakes an idle session, and reaches a busy one at its next
 gap between tool calls rather than after the run. It is never held back while
@@ -172,8 +174,8 @@ ask that is not waiting (a background ask, or one that timed out, that the
 user stopped, or whose session restarted) is delivered like a message: it
 starts a turn, and its label says the ask is not waiting for it. An
 unattended session waits rather than asking in the background because ending
-its turn ends its work: a delegate's settle is its result, and print mode
-exits.
+its turn ends its work: print mode exits, and an unattended TUI has no person
+to read a late answer.
 
 Every injected message opens with a neutral label: `[mailbox] From <name>
 (<full id>, working in <cwd>), another Pi session on this machine.` The short
@@ -182,7 +184,7 @@ sender is not running. The label carries no distrust wording. Safety stays
 outside the model: an owner-only mail root on one machine. The rest of the
 label depends on the kind:
 
-- A request's label says the final answer this turn goes back automatically.
+- A request's label is the sender line alone; it promises no answer.
 - An ask's label says its sender is waiting, gives the ask id and
   `session_mail_reply` as the way to answer, and says this run's last message
   is sent as the answer otherwise.
@@ -207,29 +209,22 @@ user message, and the Anthropic API joins it with the next typed prompt into
 one turn. A quiet reply starts no turn, so the user's next prompt lands right
 after it; without the end line, models read that prompt as part of the mail.
 
-Mail counts as read when it enters the conversation (`message_end`). A request
-an abort dropped before that is answered `failed`.
-
-A request the user stops a run on is held, not answered: stopping a run (Esc)
-means the user took over, not that the request is finished. Its sender sees no
-reply yet. It stays owed through further stopped runs and through runs that end
-on an error, and the next run that completes answers it `done`. That reply's
-body opens with `(The user stopped an earlier run partway and took over; the
-answer that follows is from the run that completed after that.)`, then that
-run's answer; the stopped runs' partial text is not included. Asks are never
-held, because their sender is blocked waiting: a stopped run answers them
-`stopped` at once. A held request lives in memory only, so a session that shuts
-down while holding one never answers it.
+Mail counts as read when it enters the conversation (`message_end`). An ask
+an abort dropped before that is answered `failed`. Asks are never held across a
+stop, because their sender is blocked waiting: a stopped run answers them
+`stopped` at once.
 
 ## Envelopes
 
-Every envelope is a JSON file with `id`, `from`, `to`, `kind`, `hops`,
+Every envelope is a JSON file with `id`, `from`, `to`, `kind`,
 `in_reply_to`, `status`, `ts` and `body`. `kind` is one of:
 
-- `request`, answered when the recipient settles.
+- `request`, mail another extension sends through `message:send`; the
+  extension that consumes it in the recipient answers it, if anything does.
 - `reply`, an answer that names what it answers in `in_reply_to`.
 - `message`, plain mail that expects no answer.
-- `ask`, a question whose sender waits for the answer, answered like a request.
+- `ask`, a question whose sender waits for the answer, answered with
+  `session_mail_reply` or when the recipient settles.
 
 A `kind` this version does not know is read as `message`: the envelope is
 delivered, wakes the session and expects no answer. The original value is not
@@ -240,42 +235,30 @@ An envelope whose `in_reply_to` names more than 50 requests (50 is allowed) is
 set aside with a warning, like any other envelope that cannot be read: it stays in `cur/`
 and is not delivered.
 
-`hops` is a non-negative integer counting how many times a chain of mail has
-woken or steered a session with no person typing (see
-[Hop limit](#hop-limit)). An envelope written before `kind` and `hops` existed
-is read as a reply when `in_reply_to` is non-empty and as a request otherwise,
-with hops 0.
+An envelope written before `kind` existed is read as a reply when `in_reply_to`
+is non-empty and as a request otherwise.
 
-A reply's `status` says how the run ended, not whether the job succeeded.
-Requests, asks and messages carry no status.
+There is no hop count or other limit on chains of mail: sessions can keep waking
+each other. An old envelope that still carries a `hops` property is read and
+delivered like any other, and the property is ignored.
+
+Requests, asks and messages carry no status. A reply's `status` is one of
+`done`, `stopped` and `failed`.
+
+The answer to an ask, from `session_mail_reply` (always `done`) or at settle,
+uses the status to say how the run ended, not whether the job succeeded, and
+`pi-session-mail` writes the body:
 
 | `status` | Meaning |
 | --- | --- |
-| `done` | the run settled; the body is its answer, opening with a note that the user took over when the request was held across a stop |
-| `stopped` | the user stopped the run before it settled; the body says so, then the partial text. Only asks are answered `stopped`; requests are held instead |
-| `failed` | the run did not do the job, and the body says why: either the run ended on an error (such as an API error Pi's retries gave up on), and the body gives the error, then the partial text; or the session was stopped before it read the request or ask, and nothing was done |
+| `done` | the run settled; the body is its answer |
+| `stopped` | the user stopped the run before it settled; the body says so, then the partial text |
+| `failed` | the run did not do the job, and the body says why: either the run ended on an error (such as an API error Pi's retries gave up on), and the body gives the error, then the partial text; or the session was stopped before it read the ask, and nothing was done |
 
-## Hop limit
-
-Each session keeps a hop count for its current turn. It is 0 once the user
-starts or steers the turn: any Pi `input` event, whether typed, sent over RPC,
-or a prompt a command sent. Otherwise it is the highest `hops` plus one among
-the envelopes that started the turn or steered into it, requests and messages
-alike, and a reply a `message:inbound` listener took over. A reply shown
-quietly starts no turn and does not count. The count starts afresh when the
-run settles.
-
-`session_mail_send` and `session_mail_ask` stamp the count on their mail, and
-are refused before anything is written once the count has reached the limit (5
-unless `session-mail.json` says otherwise; see
-[Configuration](#configuration)). The refusal says that a person typing in
-either session starts the count again. Automatic answers carry the count and
-are never refused. A `message:send` is never refused at send time: its consumer
-acts for the user. Emitted while the session is idle it carries 0; during a run
-it carries that run's count, and the session that receives it counts it like
-any other mail, so a chain that reaches the limit is refused there as a loop.
-The limit is a loop guard, not a security boundary: a hand-written envelope
-can claim any `hops`.
+A reply to a request is different: its consumer sets the status and the body
+through [`message:reply`](#messagereply), and `pi-session-mail` writes them as
+given. It adds no wording and waits for nothing. What `done`, `stopped` and
+`failed` mean for a request is for the consumer to define.
 
 ## Pruning
 
@@ -304,29 +287,30 @@ reports `Removed <N> mailbox folders of closed sessions`.
 (`PI_CODING_AGENT_DIR`, or `~/.pi/agent`), so each agent directory sets its own:
 
 ```json
-{ "hopLimit": 5, "pruneAfterDays": 30 }
+{ "pruneAfterDays": 30 }
 ```
 
 | Key | Effect |
 | --- | --- |
-| `hopLimit` | A positive integer: how many hops a chain of sessions waking each other may reach before `session_mail_send` and `session_mail_ask` are refused. Default 5. |
 | `pruneAfterDays` | A positive integer: how many days a closed session's mailbox folder is kept before it is [pruned](#pruning). Default 30. |
 
-The file is read at each send and at session start. A missing file, or one
+The file is read at session start. A missing file, or one
 without a key, means that key's default. An unreadable or invalid file, or an
-invalid value, also means the default (5 hops, 30 days), with one warning per
-session.
+invalid value, also means the default (30 days), with one warning per
+session. A key this version does not know, such as the former `hopLimit`, is ignored.
 
-The only environment variable it reads is the standard `XDG_STATE_HOME`, at
-every call, to place the mail root (see [How mail works](#how-mail-works)). It
-sets no environment variable of its own.
+It reads two environment variables: the standard `XDG_STATE_HOME`, at every
+call, to place the mail root (see [How mail works](#how-mail-works)), and
+`PI_UNATTENDED`, which `session_mail_ask` checks to tell whether a person is
+watching a TUI session (see [the tools](#running-sessions)). It sets no
+environment variable of its own.
 
 ## Hooks
 
 Other extensions integrate through the `pi.events` hooks below. They never
 import this package or read its files.
 
-`pi-session-mail` provides all three hooks and consumes none. All three depend
+`pi-session-mail` provides all four hooks and consumes none. All four depend
 on listeners doing all their work **synchronously**: the emitter reads the
 results off the payload the moment `emit` returns, so a listener must finish
 before its first `await`.
@@ -335,7 +319,9 @@ The `js` blocks below are the contract's worked examples, and
 `test/hooks.test.ts` extracts and runs them verbatim, one per block, on a real
 `createEventBus`. Their scope is the test harness's: `pi` is the extension
 API, `peer` is another session's address, `bareBus` is an event bus with no
-`message:send` provider, and `assert` is `node:assert/strict`. Write them as
+`message:send` provider, `peerPi` is the extension API of the session at
+`peer` (in the examples that need both ends), and `assert` is
+`node:assert/strict`. Write them as
 plain JavaScript so they stay runnable; the name after `js` is the test that
 runs that block.
 
@@ -352,18 +338,13 @@ refuse rather than pretend the message was sent.
 | --- | --- | --- |
 | `to` | consumer | the recipient's address: a session id |
 | `body` | consumer | the message text |
-| `envelope` | provider | the written request: `id`, `from`, `to`, `kind` (`"request"`), `hops` (the run's hop count during a run, `0` when idle), `in_reply_to`, `status`, `ts`, `body` |
+| `envelope` | provider | the written request: `id`, `from`, `to`, `kind` (`"request"`), `in_reply_to`, `status`, `ts`, `body` |
 | `error` | provider | why nothing was written: no active session, or an invalid `to` or `body` |
 
-While a run is active, between `agent_start` and `agent_settled`, the request
-carries that run's hop count (see [Hop limit](#hop-limit)), so two models that
-delegate to each other through an extension cannot escape the limit. While the
-session is idle it carries 0, as the example below does. The provider never
-refuses a send for its hop count; the receiving session refuses past the limit
-as a loop.
-
 The request's `id` is what a reply names in its `in_reply_to`, so a consumer
-that wants its answers back should keep it.
+that wants its answers back should keep it. `pi-session-mail` never answers a
+request by itself: the extension that consumes it in the recipient session
+sends any reply, through [`message:reply`](#messagereply).
 
 ```js message:send
 // Send a request from this session and keep the id a reply will name.
@@ -374,7 +355,7 @@ assert.equal(payload.error, undefined);
 assert.ok(payload.envelope, "a provider sets `envelope` before `emit` returns");
 assert.equal(typeof payload.envelope.id, "string");
 assert.equal(payload.envelope.kind, "request");
-assert.equal(payload.envelope.hops, 0);
+assert.equal("hops" in payload.envelope, false);
 ```
 
 ```js no-provider
@@ -385,10 +366,92 @@ assert.equal(probe.envelope, undefined);
 assert.equal(probe.error, undefined);
 ```
 
+### `message:reply`
+
+A consumer that took over a request emits `{ to, inReplyTo, body, status }` to
+answer it, whenever its work is done. A provider writes a reply (`kind:
+"reply"`) from its own session's address and sets `envelope` on the same
+object before `emit` returns, or sets `error` instead and writes nothing.
+**If neither is set, no provider is installed**, as with `message:send`.
+
+| Field | Set by | Meaning |
+| --- | --- | --- |
+| `to` | consumer | the request's sender: a session id, checked as `message:send` checks it |
+| `inReplyTo` | consumer | the ids of the requests this answers: a non-empty list of non-empty strings, at most 50 |
+| `body` | consumer | the reply text: any string, empty included |
+| `status` | consumer | required: `"done"`, `"stopped"` or `"failed"`; the consumer defines what each means for its request (see [Envelopes](#envelopes)) |
+| `envelope` | provider | the written reply: `id`, `from`, `to`, `kind` (`"reply"`), `in_reply_to`, `status`, `ts`, `body` |
+| `error` | provider | why nothing was written: no active session, an invalid field, or a failed write |
+
+The hook is for answering requests. The reply's `from` is always this
+session; a `from` on the payload is ignored. `body` and `status` are written
+exactly as given: the reply does not wait for the run to settle, does not use
+the model's answer and adds no wording. `inReplyTo` is checked for shape only:
+its ids are not looked up in this session's mailbox, so the hook does not
+check that they name requests this session received. Nothing stops a second
+reply to the same request either: every valid call writes one, and the
+consumer makes sure it answers once. An ask is answered with
+`session_mail_reply` or at settle, never through this hook, which leaves an
+ask's bookkeeping alone.
+
+The reply goes through the mailbox like any other: one the sender is not
+running to receive waits in its inbox and is claimed when it starts again.
+The sender then gets it through `message:inbound` with its `requests` copies,
+and a listener there can take it over.
+
+```js message:reply
+// The consumer in the peer session takes over the requests it receives.
+const taken = [];
+peerPi.events.on("message:inbound", (inbound) => {
+  if (inbound.handled || inbound.envelope.kind !== "request") return;
+  inbound.handled = true;
+  taken.push(inbound.envelope);
+});
+
+// This session sends a request, and the peer claims it now.
+const request = { to: peer, body: "Please run the test suite." };
+pi.events.emit("message:send", request);
+peerPi.events.emit("message:scan", {});
+assert.equal(taken.length, 1);
+
+// When its work is done, the consumer answers from the peer session.
+const reply = { to: taken[0].from, inReplyTo: [taken[0].id], body: "All 42 tests pass.", status: "done" };
+peerPi.events.emit("message:reply", reply);
+assert.equal(reply.error, undefined);
+assert.ok(reply.envelope, "a provider sets `envelope` before `emit` returns");
+assert.equal(reply.envelope.kind, "reply");
+assert.equal(reply.envelope.from, peer);
+
+// The reply reaches this session through `message:inbound`, unchanged.
+const replies = [];
+pi.events.on("message:inbound", (inbound) => replies.push(inbound));
+pi.events.emit("message:scan", {});
+assert.equal(replies.length, 1);
+const [{ envelope, requests }] = replies;
+assert.deepEqual(envelope.in_reply_to, [request.envelope.id]);
+assert.equal(envelope.body, "All 42 tests pass.");
+assert.equal(envelope.status, "done");
+assert.equal(requests[0].envelope.id, request.envelope.id);
+
+// Invalid input sets `error` and writes nothing.
+const unknown = { to: peer, inReplyTo: [request.envelope.id], body: "?", status: "maybe" };
+pi.events.emit("message:reply", unknown);
+assert.equal(unknown.envelope, undefined);
+assert.match(unknown.error, /status/);
+
+// With no provider installed, neither field is set.
+const probe = { to: peer, inReplyTo: [request.envelope.id], body: "hello", status: "done" };
+bareBus.emit("message:reply", probe);
+assert.equal(probe.envelope, undefined);
+assert.equal(probe.error, undefined);
+```
+
 ### `message:inbound`
 
 `pi-session-mail` emits this for every claimed envelope before injecting it,
-requests, messages and replies alike.
+requests, asks, messages and replies alike, except the reply to an ask this
+session is waiting on: that goes to the waiting `session_mail_ask` call as its
+result and is neither emitted nor injected.
 
 `pi-session-mail` never emits it from inside a `session_start` handler. Mail
 waiting when a session starts is claimed on a later event-loop turn
@@ -400,15 +463,16 @@ listener's handler. The watcher and the poll timer deliver later mail as usual.
 
 | Field | Meaning |
 | --- | --- |
-| `envelope` | the claimed envelope, with `from`, `kind`, `hops`, `in_reply_to`, `status`, `body` and the rest; an old envelope without `kind` or `hops` gets them filled in as described above |
+| `envelope` | the claimed envelope, with `from`, `kind`, `in_reply_to`, `status`, `body` and the rest; an old envelope without `kind` gets it filled in as described above |
 | `path` | the envelope's path in this session's `cur/` |
 | `requests` | a reply's `in_reply_to` requests found in this session's `sent/`, each as `{ envelope, path }`; empty for a request, and shorter than `in_reply_to` when a copy is missing |
 | `handled` | set to `true` by a listener that shows the message itself; `pi-session-mail` then injects nothing |
 
 A listener that sets `handled` owns the display, and chooses whether its own
-message starts a turn (`triggerTurn`). A request a listener handled still
-arms this session's reply and counts as read, so a takeover never leaves a
-sender without an answer. A reply `pi-session-mail` injects itself quotes each
+message starts a turn (`triggerTurn`). Handled mail counts as read, and an
+ask a listener handled is still answered when this session settles. A request
+arms no answer, handled or not: the listener that consumes it owns its reply. A
+reply `pi-session-mail` injects itself quotes each
 request the same way, capped at 2 KiB with the copy's path.
 
 ```js message:inbound
@@ -436,7 +500,9 @@ pi.events.on("message:inbound", (payload) => {
 A consumer emits `{}` to have `pi-session-mail` claim the mail waiting in its
 inbox now, instead of at the next watcher event or poll. The listener runs the
 inbox scan synchronously, so every waiting envelope has been emitted as
-`message:inbound` (and delivered) by the time `emit` returns, and then sets
+`message:inbound` (and delivered) by the time `emit` returns, except the
+reply to an ask this session is waiting on, which goes to the waiting
+`session_mail_ask` call instead. The listener then sets
 `scanned` to `true`. **If `scanned` is not set, no provider is installed**,
 and the consumer must not conclude that no reply is waiting.
 
@@ -469,21 +535,21 @@ assert.equal(probe.scanned, undefined);
 Sessions running older and newer copies of `pi-session-mail` share one mail
 root, and other extensions depend on its hooks, so these are stable:
 
-- The three hooks, `message:send`, `message:inbound` and `message:scan`, and
-  their payloads as [Hooks](#hooks) describes them.
+- The four hooks, `message:send`, `message:reply`, `message:inbound` and
+  `message:scan`, and their payloads as [Hooks](#hooks) describes them.
 - The `[mailbox] From …` label and the `[mailbox] End of the mail …` line that
   frame injected mail.
 - The mail root path, `$XDG_STATE_HOME/pi-session-mail/`, or
   `~/.local/state/pi-session-mail/` when `XDG_STATE_HOME` is unset or not
   absolute.
-- The envelope fields (`id`, `from`, `to`, `kind`, `hops`, `in_reply_to`,
+- The envelope fields (`id`, `from`, `to`, `kind`, `in_reply_to`,
   `status`, `ts`, `body`), the kinds (`request`, `reply`, `message`, `ask`)
   and a reply's statuses (`done`, `stopped`, `failed`); see
   [Envelopes](#envelopes).
 - The names of the tools (`session_mail_list`, `session_mail_send`,
   `session_mail_ask`, `session_mail_reply`) and of the `/mailbox`,
   `/mailbox:send` and `/mailbox:prune` commands.
-- The keys of `session-mail.json`, today `hopLimit` and `pruneAfterDays`.
+- The keys of `session-mail.json`, today `pruneAfterDays`.
 
 Changing any of them needs a major version from 1.0 on, and a minor version
 while the package is at 0.x.

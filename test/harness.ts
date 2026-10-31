@@ -20,6 +20,10 @@ import { send } from "../src/store.ts";
 export const dir = mkdtempSync(join(tmpdir(), "mailbox-test-"));
 process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
 process.env.XDG_STATE_HOME = join(dir, "state");
+// A test run inside an unattended Pi session (such as a pi-squire delegate)
+// inherits PI_UNATTENDED=1, which would make the attended-ask test wait for
+// the 10-minute ask timeout. Tests that need it set it themselves.
+delete process.env.PI_UNATTENDED;
 after(() => rmSync(dir, { recursive: true, force: true }));
 
 /** The mail root under the current `XDG_STATE_HOME`. */
@@ -252,8 +256,13 @@ export function session(
 		},
 		/** Run `/mailbox args`; Pi starts a session before any command, so a session not yet started starts first. */
 		mailbox: (args: string) => command("mailbox", args),
-		/** Send a request as the removed typed `/mailbox <to> <text>` did: `send()`, kind request, hops 0. */
-		request: (to: string, text: string) => send(sessionId, to, text.trim(), { kind: "request", hops: 0 }),
+		/** Send a request as the removed typed `/mailbox <to> <text>` did: `send()`, kind request. */
+		request: (to: string, text: string) => send(sessionId, to, text.trim(), { kind: "request" }),
+		/** Send an ask through `send()`, as `session_mail_ask` writes one, without waiting for its answer. */
+		ask: (to: string, text: string) => send(sessionId, to, text.trim(), { kind: "ask" }),
+		/** A reply fixture written straight through `send()`, `done` unless given; a consumer's real reply goes through `message:reply`. */
+		reply: (to: string, inReplyTo: string[], body: string, status?: string) =>
+			send(sessionId, to, body, { kind: "reply", inReplyTo, ...(status === undefined ? {} : { status }) }),
 		/** Rename the session, as `/name` does, and tell the extension. */
 		setName: (next: string | undefined) => {
 			name = next;

@@ -13,15 +13,16 @@
 // expects no answer. Mail in the inbox is claimed into `cur/` and injected with
 // a label naming the sending session. Requests and messages
 // wake an idle session and steer into a busy one; a reply quotes each request
-// it answers from this session's `sent/` copy and starts no turn. When the recipient settles, its
-// last answer goes back to each sender as one reply — `done` normally, or
-// `stopped` when the user stopped the run, with any partial text, or `failed`
-// when the run ended on an error, with the error and any partial text. A
-// request is never answered `stopped`: a run the user stopped holds it, owed,
-// until a run completes, and that answer says the user took over. Requests
-// that never entered the conversation (an abort drops queued follow-ups) get
-// a `failed` reply instead. Replies and messages are never answered. Other extensions use
-// `pi.events` (below).
+// it answers from this session's `sent/` copy and starts no turn. A request
+// gets no automatic answer: the extension that consumes it owns its reply and
+// sends it through `message:reply`. An
+// ask not answered with `session_mail_reply` is answered when the recipient
+// settles, its last answer going back to each sender as one reply — `done`
+// normally, `stopped` when the user stopped the run, with any partial text, or
+// `failed` when the run ended on an error, with the error and any partial
+// text. Asks that never entered the conversation (an abort drops queued
+// follow-ups) get a `failed` reply instead. Replies and messages are never
+// answered. Other extensions use `pi.events` (below).
 //
 // The hook contracts live in this package's README.
 import { type FSWatcher, statSync, watch } from "node:fs";
@@ -31,7 +32,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { mailStatus } from "./mail-status.ts";
 import { type Peer, type PickerFilter, type PickerItem, type PickResult, picker } from "./picker.ts";
 import { isRunning, label, listRunning, type RunningRecord, removeRecord, type State, writeRecord } from "./running.ts";
-import { type SettleInput, settle } from "./settle.ts";
+import { type SettleAsksInput, settleAsks } from "./settle.ts";
 import {
 	boxPath,
 	claim,
@@ -41,6 +42,7 @@ import {
 	findSent,
 	isAddress,
 	listNew,
+	MAX_REPLY_IDS,
 	pruneClosed,
 	readEnvelope,
 	readMailbox,
@@ -142,7 +144,6 @@ function inboundText(
 	const id = plain(envelope.id);
 	const replyIds = envelope.in_reply_to.map(plain);
 	const header = [sender.line];
-	if (envelope.kind === "request") header.push("Your final answer this turn goes back to it automatically.");
 	if (envelope.kind === "ask")
 		header.push(
 			`It is waiting for your answer to its ask ${id}. Answer with session_mail_reply (ask ${id}); otherwise this run's last message is sent as the answer.`,
@@ -167,20 +168,35 @@ function inboundText(
  * synchronous code before `emit` returns; do all work before any `await`.
  *
  * - `message:send`: the caller emits `{ to, body }`; `pi-session-mail` writes a
- *   request, stamped with the run's hop count during a run and 0 when idle,
- *   and sets `envelope` (or `error`) on the same object. Neither set means no
+ *   request and sets `envelope` (or `error`) on the same object. Neither set means no
  *   provider is installed.
  * - `message:inbound`: emitted for every claimed envelope, requests and
- *   replies alike, before injection; `requests` holds a reply's request
- *   copies from this session's `sent/`, and a listener sets `handled` to show
- *   the message itself.
+ *   replies alike, before injection, except the reply to an ask this session
+ *   is waiting on, which is the waiting tool call's result; `requests` holds
+ *   a reply's request copies from this session's `sent/`, and a listener sets
+ *   `handled` to show the message itself.
+ * - `message:reply`: the caller emits `{ to, inReplyTo, body, status }`;
+ *   `pi-session-mail` writes a reply from this session and sets `envelope`
+ *   (or `error`), as for `message:send`. It answers requests a consumer took
+ *   over; the ids are checked for shape only, never looked up.
  */
 const SEND = "message:send";
+const REPLY = "message:reply";
+/** The statuses a `message:reply` caller may give, the same as a settled ask's. */
+const REPLY_STATUSES: readonly string[] = ["done", "stopped", "failed"];
 const INBOUND = "message:inbound";
 /** A consumer's request to claim waiting mail now; see the README's `message:scan`. */
 const SCAN = "message:scan";
 
 type SendPayload = { to: unknown; body: unknown; envelope?: Envelope; error?: string };
+type ReplyPayload = {
+	to: unknown;
+	inReplyTo: unknown;
+	body: unknown;
+	status: unknown;
+	envelope?: Envelope;
+	error?: string;
+};
 type InboundPayload = { envelope: Envelope; path: string; requests: SentCopy[]; handled: boolean };
 
 type Message = { role?: string; content?: unknown; stopReason?: unknown; errorMessage?: unknown };
@@ -222,15 +238,8 @@ export default function mailbox(pi: ExtensionAPI) {
 	let timer: ReturnType<typeof setInterval> | undefined;
 	/** Envelope ids already handed to Pi in this process. */
 	const delivered = new Set<string>();
-	/** Request ids awaiting this session's reply, keyed by sender. In memory only. */
-	let owed = new Map<string, string[]>();
-	/** Owed request ids whose message entered the conversation (or a listener took over). */
+	/** Ids of mail whose message entered the conversation (or a listener took over); settle reads it for asks. */
 	let seen = new Set<string>();
-	/**
-	 * Request ids held across a stop: the user stopped a run while they were
-	 * owed, so they wait, still owed, for the next run that completes.
-	 */
-	let held = new Set<string>();
 	/** Text of the last assistant message, remembered at `agent_end`. */
 	let lastAnswer: string | undefined;
 	/** Whether the user stopped that run, whatever its last message's `stopReason`. */
@@ -239,12 +248,6 @@ export default function mailbox(pi: ExtensionAPI) {
 	let lastError: string | undefined;
 	/** Ids of injected mail that has not entered the conversation yet, for the status's unread count. */
 	let unread = new Set<string>();
-	/**
-	 * The hop count of the current turn: 0 once the user starts or steers it,
-	 * otherwise the highest `hops` + 1 among the envelopes that started or
-	 * steered into it. Mail sent from the turn carries it.
-	 */
-	let hops = 0;
 	/** The problems with `session-mail.json` this session has already warned about. */
 	let configWarned = new Set<string>();
 	/** What this session's running-session record says. */
@@ -395,13 +398,9 @@ export default function mailbox(pi: ExtensionAPI) {
 		// Listeners run synchronously inside emit, so `handled` is final when it returns.
 		const inbound: InboundPayload = { envelope, path, requests, handled: false };
 		pi.events.emit(INBOUND, inbound);
-		// Only requests arm an answer: replies are never answered, and messages
-		// expect none. A request arms one even when a listener took over its display.
-		if (envelope.kind === "request") owed.set(envelope.from, [...(owed.get(envelope.from) ?? []), envelope.id]);
+		// Only asks arm an answer: the extension that consumes a request owns its
+		// reply, replies are never answered, and messages expect none.
 		tools?.armAsk(envelope);
-		// Mail that wakes or steers the session raises its count; a reply shown
-		// quietly starts no turn, but one a listener took over may.
-		if (wakes || inbound.handled) hops = Math.max(hops, envelope.hops + 1);
 		// `pi-session-mail` cannot observe a listener's own message, so a takeover counts as seen.
 		if (inbound.handled) {
 			seen.add(envelope.id);
@@ -458,11 +457,32 @@ export default function mailbox(pi: ExtensionAPI) {
 		try {
 			if (address === undefined) throw new Error("no active session has a mailbox address");
 			if (typeof payload.body !== "string") throw new Error("body must be a string");
-			// During a run the caller is the model acting through an extension, so the
-			// request continues the run's chain; idle, it acts for the user and starts a
-			// fresh one. It is never refused here: the receiving side enforces the limit.
-			const hopsNow = state === "busy" ? hops : 0;
-			payload.envelope = send(address, payload.to as string, payload.body, { kind: "request", hops: hopsNow });
+			payload.envelope = send(address, payload.to as string, payload.body, { kind: "request" });
+		} catch (err) {
+			payload.error = (err as Error).message;
+		}
+	});
+
+	// Synchronous on purpose, like `message:send`. The reply is written as the
+	// caller gives it, now: no settle, no assistant text, no added wording, and
+	// no lookup or duplicate guard on `inReplyTo`; the consumer owns all that.
+	pi.events.on(REPLY, (data) => {
+		const payload = data as ReplyPayload;
+		if (typeof payload !== "object" || payload === null) return;
+		try {
+			if (address === undefined) throw new Error("no active session has a mailbox address");
+			const ids = payload.inReplyTo;
+			if (!Array.isArray(ids) || ids.length === 0 || !ids.every((id) => typeof id === "string" && id !== ""))
+				throw new Error("inReplyTo must be a non-empty list of non-empty request ids");
+			if (ids.length > MAX_REPLY_IDS) throw new Error(`inReplyTo names more than ${MAX_REPLY_IDS} requests`);
+			if (typeof payload.body !== "string") throw new Error("body must be a string");
+			if (typeof payload.status !== "string" || !REPLY_STATUSES.includes(payload.status))
+				throw new Error(`status must be one of ${REPLY_STATUSES.map((s) => JSON.stringify(s)).join(", ")}`);
+			payload.envelope = send(address, payload.to as string, payload.body, {
+				kind: "reply",
+				inReplyTo: [...ids],
+				status: payload.status,
+			});
 		} catch (err) {
 			payload.error = (err as Error).message;
 		}
@@ -497,14 +517,11 @@ export default function mailbox(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, context) => {
 		stop();
 		ctx = context;
-		owed = new Map();
 		seen = new Set();
-		held = new Set();
 		lastAnswer = undefined;
 		lastAborted = false;
 		lastError = undefined;
 		unread = new Set();
-		hops = 0;
 		tools?.abandonAsk();
 		waitingOn = "";
 		configWarned = new Set();
@@ -563,12 +580,6 @@ export default function mailbox(pi: ExtensionAPI) {
 		if (unread.delete(message.details.id)) updateStatus();
 	});
 
-	// Typed text, RPC input and a prompt a command sends all come from the
-	// user, so each starts the chain again.
-	pi.on("input", async () => {
-		hops = 0;
-	});
-
 	pi.on("session_info_changed", async (event) => {
 		name = event.name || undefined;
 		announce();
@@ -606,24 +617,12 @@ export default function mailbox(pi: ExtensionAPI) {
 	// queued follow-up after `agent_end` would otherwise get a premature answer.
 	pi.on("agent_settled", async () => {
 		const me = address;
-		// Answers carry the settled turn's count; the next turn counts afresh.
-		const answerHops = hops;
-		hops = 0;
-		const end: SettleInput["end"] = lastAborted
+		const end: SettleAsksInput["end"] = lastAborted
 			? { kind: "stopped" }
 			: lastError !== undefined
 				? { kind: "failed", error: lastError }
 				: { kind: "done" };
-		const decision = settle({
-			requests: owed,
-			asks: tools?.takeOwedAsks() ?? new Map(),
-			seen,
-			held,
-			end,
-			answer: lastAnswer,
-		});
-		owed = decision.owed;
-		held = decision.held;
+		const replies = settleAsks({ asks: tools?.takeOwedAsks() ?? new Map(), seen, end, answer: lastAnswer });
 		seen = new Set();
 		lastAnswer = undefined;
 		lastAborted = false;
@@ -632,11 +631,10 @@ export default function mailbox(pi: ExtensionAPI) {
 		state = "idle";
 		announce();
 		if (me === undefined) return;
-		for (const reply of decision.replies) {
+		for (const reply of replies) {
 			const { to } = reply;
 			try {
-				// Answers are never refused by the hop limit.
-				send(me, to, reply.body, { kind: "reply", hops: answerHops, inReplyTo: reply.ids, status: reply.status });
+				send(me, to, reply.body, { kind: "reply", inReplyTo: reply.ids, status: reply.status });
 			} catch (err) {
 				warn(`could not reply to ${to}: ${(err as Error).message}`);
 			}
@@ -663,8 +661,6 @@ export default function mailbox(pi: ExtensionAPI) {
 			waitingOn = to;
 			announce();
 		},
-		hops: () => hops,
-		configProblem,
 	});
 
 	pi.registerCommand("mailbox", {
@@ -721,7 +717,7 @@ export default function mailbox(pi: ExtensionAPI) {
 			const text = (await context.ui.input("Message", "type a message"))?.trim();
 			if (text === undefined || text === "") return;
 			try {
-				const envelope = send(me, target.address, text, { kind: "message", hops: 0 });
+				const envelope = send(me, target.address, text, { kind: "message" });
 				context.ui.notify(`Sent ${envelope.id} to ${envelope.to}`, "info");
 			} catch (err) {
 				context.ui.notify(`mailbox: ${(err as Error).message}`, "error");
