@@ -741,7 +741,8 @@ test("in a TUI session a person watches, an ask returns at once and the answer a
 	await until(() => a.sent.length === 1, "the answer to be injected");
 	assert.deepEqual(a.sent[0].options, { triggerTurn: true, deliverAs: "steer" });
 	assert.match(a.sent[0].message.content, /answers an ask of yours that is not waiting for it/);
-	assert.ok(a.sent[0].message.content.includes(`reply to your request ${details.id}`));
+	assert.ok(a.sent[0].message.content.includes(`reply to your ask ${details.id}.`));
+	assert.ok(a.sent[0].message.content.includes(`[mailbox] Your ask ${details.id}, quoted from `));
 	assert.match(a.sent[0].message.content, /work done\n\n\[mailbox\] End of the mail from /);
 	await a.shutdown();
 	await b.shutdown();

@@ -6,6 +6,14 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The label on the answer to an ask now calls it an ask: "It is a reply to your
+  ask …" and "[mailbox] Your ask …, quoted from …" (and "Ask cut at 2 KiB").
+  It said "request" before, which now names a different kind of mail. A reply
+  to a request, or to an id with no copy in `sent/`, keeps the request wording.
+  The test that pinned the old wording for an ask's answer is updated.
+
 ## [0.6.0] - 2026-10-31
 
 ### Added
