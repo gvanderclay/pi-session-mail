@@ -15,6 +15,7 @@ import { test } from "node:test";
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 
 import register from "../src/index.ts";
+import { send } from "../src/store.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "mailbox-hooks-"));
 process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
@@ -97,11 +98,8 @@ function session(sessionId: string) {
 		sent,
 		start: () => fire("session_start", { reason: "startup" }),
 		shutdown: () => fire("session_shutdown"),
-		/** One agent run ending with `text` as the last assistant message, then settling. */
-		answer: async (text: string) => {
-			await fire("agent_end", { messages: [{ role: "assistant", content: [{ type: "text", text }] }] });
-			await fire("agent_settled");
-		},
+		/** Answer requests as the extension that consumes them would: a `done` reply through `send()`. */
+		reply: (to: string, inReplyTo: string[], body: string) => send(sessionId, to, body, { kind: "reply", inReplyTo }),
 	};
 }
 
@@ -173,7 +171,7 @@ test("the README's message:inbound example takes over a reply, quoting its reque
 		const [request] = envelopes(s.id, "sent");
 		const [requestCopy] = files(s.id, "sent");
 		await until(() => r.sent.length === 1, "r to receive the request");
-		await r.answer("the answer");
+		r.reply(s.id, [request.id], "the answer");
 		await until(() => s.sent.length === 2, "the reply to be injected");
 		assert.deepEqual(
 			s.sent.map((m) => m.message.customType),
@@ -209,7 +207,8 @@ test("the README's message:scan example has a waiting reply emitted as message:i
 		await until(() => r.sent.length === 1, "r to receive the request");
 		// r's reply is on disk in s's inbox. Nothing below yields to the event
 		// loop, so s's watcher and poll timer cannot claim it before the scan.
-		await r.answer("the answer");
+		const [request] = envelopes(s.id, "sent");
+		r.reply(s.id, [request.id], "the answer");
 		assert.equal(files(s.id, "new").length, 1, "the reply is waiting");
 		await runExample("message:scan", { pi: s.pi, peer: r.id, bareBus: createEventBus() });
 		assert.equal(files(s.id, "new").length, 0, "the scan claimed it");

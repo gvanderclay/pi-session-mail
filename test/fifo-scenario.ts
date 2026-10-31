@@ -31,7 +31,7 @@ try {
 	await until(() => b.sent.length === 1, "B to receive");
 	assert.deepEqual(diskCounts(b.id), { unclaimed: 0, read: 1, awaiting: 0 });
 	// A reply quotes the request from A's sent/, next to the planted name.
-	await b.answer("answer");
+	b.reply(a.id, [request.id], "answer");
 	await until(() => a.sent.length === 1, "A to receive the reply");
 	assert.match(a.sent[0].message.content, /question/);
 	assert.deepEqual(diskCounts(a.id), { unclaimed: 0, read: 1, awaiting: 0 });

@@ -13,15 +13,15 @@
 // expects no answer. Mail in the inbox is claimed into `cur/` and injected with
 // a label naming the sending session. Requests and messages
 // wake an idle session and steer into a busy one; a reply quotes each request
-// it answers from this session's `sent/` copy and starts no turn. When the recipient settles, its
-// last answer goes back to each sender as one reply — `done` normally, or
-// `stopped` when the user stopped the run, with any partial text, or `failed`
-// when the run ended on an error, with the error and any partial text. A
-// request is never answered `stopped`: a run the user stopped holds it, owed,
-// until a run completes, and that answer says the user took over. Requests
-// that never entered the conversation (an abort drops queued follow-ups) get
-// a `failed` reply instead. Replies and messages are never answered. Other extensions use
-// `pi.events` (below).
+// it answers from this session's `sent/` copy and starts no turn. A request
+// gets no automatic answer: the extension that consumes it owns its reply. An
+// ask not answered with `session_mail_reply` is answered when the recipient
+// settles, its last answer going back to each sender as one reply — `done`
+// normally, `stopped` when the user stopped the run, with any partial text, or
+// `failed` when the run ended on an error, with the error and any partial
+// text. Asks that never entered the conversation (an abort drops queued
+// follow-ups) get a `failed` reply instead. Replies and messages are never
+// answered. Other extensions use `pi.events` (below).
 //
 // The hook contracts live in this package's README.
 import { type FSWatcher, statSync, watch } from "node:fs";
@@ -31,7 +31,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { mailStatus } from "./mail-status.ts";
 import { type Peer, type PickerFilter, type PickerItem, type PickResult, picker } from "./picker.ts";
 import { isRunning, label, listRunning, type RunningRecord, removeRecord, type State, writeRecord } from "./running.ts";
-import { type Reply, type SettleInput, settleAsks, settleRequests } from "./settle.ts";
+import { type SettleAsksInput, settleAsks } from "./settle.ts";
 import {
 	boxPath,
 	claim,
@@ -142,7 +142,6 @@ function inboundText(
 	const id = plain(envelope.id);
 	const replyIds = envelope.in_reply_to.map(plain);
 	const header = [sender.line];
-	if (envelope.kind === "request") header.push("Your final answer this turn goes back to it automatically.");
 	if (envelope.kind === "ask")
 		header.push(
 			`It is waiting for your answer to its ask ${id}. Answer with session_mail_reply (ask ${id}); otherwise this run's last message is sent as the answer.`,
@@ -221,16 +220,8 @@ export default function mailbox(pi: ExtensionAPI) {
 	let timer: ReturnType<typeof setInterval> | undefined;
 	/** Envelope ids already handed to Pi in this process. */
 	const delivered = new Set<string>();
-	/** Ids of owed mail (requests and asks) whose message entered the conversation (or a listener took over). */
+	/** Ids of mail whose message entered the conversation (or a listener took over); settle reads it for asks. */
 	let seen = new Set<string>();
-	// Request-only state: owed and held. Asks keep theirs in `tools` (`takeOwedAsks`).
-	/** Request ids awaiting this session's reply, keyed by sender. In memory only. */
-	let owed = new Map<string, string[]>();
-	/**
-	 * Request ids held across a stop: the user stopped a run while they were
-	 * owed, so they wait, still owed, for the next run that completes.
-	 */
-	let held = new Set<string>();
 	/** Text of the last assistant message, remembered at `agent_end`. */
 	let lastAnswer: string | undefined;
 	/** Whether the user stopped that run, whatever its last message's `stopReason`. */
@@ -389,9 +380,8 @@ export default function mailbox(pi: ExtensionAPI) {
 		// Listeners run synchronously inside emit, so `handled` is final when it returns.
 		const inbound: InboundPayload = { envelope, path, requests, handled: false };
 		pi.events.emit(INBOUND, inbound);
-		// Only requests and asks arm an answer: replies are never answered, and
-		// messages expect none. A request arms one even when a listener took over its display.
-		oweRequest(envelope);
+		// Only asks arm an answer: the extension that consumes a request owns its
+		// reply, replies are never answered, and messages expect none.
 		tools?.armAsk(envelope);
 		// `pi-session-mail` cannot observe a listener's own message, so a takeover counts as seen.
 		if (inbound.handled) {
@@ -418,25 +408,6 @@ export default function mailbox(pi: ExtensionAPI) {
 			// shows itself, and starts no turn.
 			wakes ? { triggerTurn: true, deliverAs: "steer" } : { deliverAs: "followUp" },
 		);
-	}
-
-	/** Request-only: a request is owed an answer to its sender. */
-	function oweRequest(envelope: Envelope) {
-		if (envelope.kind === "request") owed.set(envelope.from, [...(owed.get(envelope.from) ?? []), envelope.id]);
-	}
-
-	/** Request-only: forget what is owed and held, as a new session starts. */
-	function resetRequests() {
-		owed = new Map();
-		held = new Set();
-	}
-
-	/** Request-only: decide the replies to the requests, and keep what stays owed and held. */
-	function settleOwedRequests(run: Pick<SettleInput, "end" | "answer">): Reply[] {
-		const decision = settleRequests({ requests: owed, seen, held, ...run });
-		owed = decision.owed;
-		held = decision.held;
-		return decision.replies;
 	}
 
 	/** Claim and deliver everything in `new/`, in name order. Synchronous, so scans never overlap. */
@@ -503,7 +474,6 @@ export default function mailbox(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, context) => {
 		stop();
 		ctx = context;
-		resetRequests();
 		seen = new Set();
 		lastAnswer = undefined;
 		lastAborted = false;
@@ -604,14 +574,12 @@ export default function mailbox(pi: ExtensionAPI) {
 	// queued follow-up after `agent_end` would otherwise get a premature answer.
 	pi.on("agent_settled", async () => {
 		const me = address;
-		const end: SettleInput["end"] = lastAborted
+		const end: SettleAsksInput["end"] = lastAborted
 			? { kind: "stopped" }
 			: lastError !== undefined
 				? { kind: "failed", error: lastError }
 				: { kind: "done" };
-		const run = { end, answer: lastAnswer };
-		const requestReplies = settleOwedRequests(run);
-		const askReplies = settleAsks({ asks: tools?.takeOwedAsks() ?? new Map(), seen, ...run });
+		const replies = settleAsks({ asks: tools?.takeOwedAsks() ?? new Map(), seen, end, answer: lastAnswer });
 		seen = new Set();
 		lastAnswer = undefined;
 		lastAborted = false;
@@ -620,7 +588,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		state = "idle";
 		announce();
 		if (me === undefined) return;
-		for (const reply of [...requestReplies, ...askReplies]) {
+		for (const reply of replies) {
 			const { to } = reply;
 			try {
 				send(me, to, reply.body, { kind: "reply", inReplyTo: reply.ids, status: reply.status });

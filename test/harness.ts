@@ -258,6 +258,11 @@ export function session(
 		mailbox: (args: string) => command("mailbox", args),
 		/** Send a request as the removed typed `/mailbox <to> <text>` did: `send()`, kind request. */
 		request: (to: string, text: string) => send(sessionId, to, text.trim(), { kind: "request" }),
+		/** Send an ask through `send()`, as `session_mail_ask` writes one, without waiting for its answer. */
+		ask: (to: string, text: string) => send(sessionId, to, text.trim(), { kind: "ask" }),
+		/** Answer requests through `send()`, as the extension that consumes them would: a reply, `done` unless given. */
+		reply: (to: string, inReplyTo: string[], body: string, status?: string) =>
+			send(sessionId, to, body, { kind: "reply", inReplyTo, ...(status === undefined ? {} : { status }) }),
 		/** Rename the session, as `/name` does, and tell the extension. */
 		setName: (next: string | undefined) => {
 			name = next;

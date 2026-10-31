@@ -17,6 +17,21 @@ follows [Semantic Versioning](https://semver.org/).
   An old stored envelope with a `hops` property is still read and delivered;
   the property is ignored. The test that pinned the old behaviour changed with
   it.
+- **Breaking:** a request (mail another extension sends through
+  `message:send`) no longer gets an automatic answer. The receiving session
+  sends no reply when the run settles, whether a `message:inbound` listener
+  took the request over or not, and whether the run completed, stopped or
+  failed or never read the request; a request is no longer held across a stop
+  and answered "took over" later. The extension that consumes a request now
+  owns its reply. A request is still stored, delivered and woken on as before,
+  keeps its `sent/` copy and shows in `/mailbox`. Its label no longer says the
+  final answer goes back automatically, and `session_mail_reply` now refuses a
+  request saying the extension that consumes it answers it. Asks are
+  unchanged. pi-squire's `delegate` relied on the automatic answer, so a
+  matching pi-squire update is required; mixing this release with an older
+  pi-squire is unsupported. The tests that pinned automatic request answers
+  changed with it: they now pin that no answer is sent, and the reply-delivery
+  tests write their replies directly.
 
 ## [0.5.0] - 2026-10-23
 

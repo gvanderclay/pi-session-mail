@@ -86,7 +86,7 @@ function askText(ask: Envelope, target: string, outcome: AskOutcome): string {
 
 /** Why `session_mail_reply` refuses mail that is not an ask, by the kind of that mail. */
 const NOT_AN_ASK: Record<Exclude<Envelope["kind"], "ask">, string> = {
-	request: "A request is answered automatically when this run settles.",
+	request: "A request is answered by the extension that consumes it, not by this tool.",
 	message: "A message expects no answer; session_mail_send sends one if it is wanted.",
 	reply: "A reply is never answered.",
 };
@@ -188,7 +188,7 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 	let waiting: WaitingAsk | undefined;
 	/** The kind of each envelope this session has claimed, by id, so a reply can say why it is refused. */
 	const receivedKinds = new Map<string, Envelope["kind"]>();
-	/** Ask ids awaiting this session's answer, keyed by sender; answered apart from requests. */
+	/** Ask ids awaiting this session's answer, keyed by sender. */
 	let owedAsks = new Map<string, string[]>();
 	/** This session's address as the extension last set it; undefined when it has none. */
 	let address: string | undefined;
@@ -354,7 +354,7 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 		name: "session_mail_reply",
 		label: "Session mail: reply",
 		description:
-			"Answer an ask another Pi session sent this session, at once, without ending this run. The asker is waiting, and gets the message as the answer to its ask; the answer this run's last message would otherwise send is then skipped for that ask. `ask` is the ask id its label gives. Each ask is answered once; requests are answered automatically when the run settles, and messages expect no answer.",
+			"Answer an ask another Pi session sent this session, at once, without ending this run. The asker is waiting, and gets the message as the answer to its ask; the answer this run's last message would otherwise send is then skipped for that ask. `ask` is the ask id its label gives. Each ask is answered once; requests are answered by the extension that consumes them, and messages expect no answer.",
 		parameters: Type.Object({
 			ask: Type.String({ description: "The ask id, as given in the ask's label." }),
 			message: Type.String({ description: "The answer." }),

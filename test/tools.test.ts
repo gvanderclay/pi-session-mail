@@ -294,7 +294,7 @@ test("a message to a busy session is steered in, not queued as a follow-up", asy
 	await b.shutdown();
 });
 
-test("a message gets no answer at settle while a request in the same run still does, and never counts as awaiting", async () => {
+test("neither a message nor a request gets an answer at settle, and a message never counts as awaiting", async () => {
 	const a = session(newId());
 	const b = session(newId());
 	await a.start();
@@ -305,10 +305,8 @@ test("a message gets no answer at settle while a request in the same run still d
 	assert.equal(diskCounts(a.id).awaiting, 1);
 	await b.answer("the answer");
 	const answers = envelopes(a.id, "new").concat(envelopes(a.id, "cur"));
-	assert.equal(answers.length, 1);
-	const request = envelopes(a.id, "sent").find((e) => e.kind === "request");
-	assert.deepEqual(answers[0].in_reply_to, [request.id]);
-	assert.equal(answers[0].body, "the answer");
+	assert.equal(answers.length, 0);
+	assert.equal(diskCounts(a.id).awaiting, 1);
 	await a.shutdown();
 	await b.shutdown();
 });
@@ -522,8 +520,8 @@ test("an envelope with a hops property from an older copy is read, delivered and
 	const b = session(newId());
 	const asker = newId();
 	await b.start();
-	plant(b.id, asker, { hops: 40 }, "request");
-	await until(() => b.sent.length === 1, "the request to be injected");
+	plant(b.id, asker, { hops: 40 }, "ask");
+	await until(() => b.sent.length === 1, "the ask to be injected");
 	assert.match(b.sent[0].message.content, /planted \d+/);
 	await b.answer("answered");
 	const [reply] = envelopes(asker, "new");
@@ -550,7 +548,7 @@ test("new envelopes carry no hops field, whoever writes them", async () => {
 	await asked;
 	await a.request(b.id, "a request");
 	await until(() => b.sent.length === 3, "the request to be delivered");
-	await b.answer("the settle answer");
+	b.reply(a.id, [envelopes(a.id, "sent").find((e) => e.kind === "request").id], "a consumer's answer");
 	const all = [
 		...envelopes(a.id, "sent"),
 		...envelopes(a.id, "new"),
@@ -939,13 +937,12 @@ test("a reply mid-run answers the ask before the answerer settles, and settle se
 	await b.shutdown();
 });
 
-test("with a request and an ask from one sender, the reply answers only the ask and settle only the request", async () => {
+test("with a request and an ask from one sender, the reply answers only the ask and settle answers neither", async () => {
 	const { a, b } = await pair();
 	await a.request(b.id, "a request");
 	const asked = a.toolCall("session_mail_ask", { to: "bravo", message: "an ask" });
 	await until(() => b.sent.length === 2, "both to be injected");
 	const sent = envelopes(a.id, "sent");
-	const request = sent.find((e) => e.kind === "request");
 	const ask = sent.find((e) => e.kind === "ask");
 	await b.agentStart();
 	await b.toolCall("session_mail_reply", { ask: ask.id, message: "the ask's answer" });
@@ -954,11 +951,8 @@ test("with a request and an ask from one sender, the reply answers only the ask 
 	await b.settle();
 	const answers = envelopes(a.id, "new").concat(envelopes(a.id, "cur"));
 	assert.deepEqual(
-		answers.map((e) => [e.in_reply_to, e.body]).sort((x, y) => String(x[1]).localeCompare(String(y[1]))),
-		[
-			[[ask.id], "the ask's answer"],
-			[[request.id], "the run's answer"],
-		],
+		answers.map((e) => [e.in_reply_to, e.body]),
+		[[[ask.id], "the ask's answer"]],
 	);
 	await a.shutdown();
 	await b.shutdown();
@@ -984,7 +978,7 @@ test("session_mail_reply refuses a second reply, a request, a message, an unknow
 	);
 	await assert.rejects(
 		b.toolCall("session_mail_reply", { ask: id("request"), message: "x" }),
-		/is a request, not an ask; nothing was sent\. A request is answered automatically when this run settles/,
+		/is a request, not an ask; nothing was sent\. A request is answered by the extension that consumes it, not by this tool/,
 	);
 	await assert.rejects(
 		b.toolCall("session_mail_reply", { ask: id("message"), message: "x" }),
