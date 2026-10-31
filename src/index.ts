@@ -171,9 +171,10 @@ function inboundText(
  *   request and sets `envelope` (or `error`) on the same object. Neither set means no
  *   provider is installed.
  * - `message:inbound`: emitted for every claimed envelope, requests and
- *   replies alike, before injection; `requests` holds a reply's request
- *   copies from this session's `sent/`, and a listener sets `handled` to show
- *   the message itself.
+ *   replies alike, before injection, except the reply to an ask this session
+ *   is waiting on, which is the waiting tool call's result; `requests` holds
+ *   a reply's request copies from this session's `sent/`, and a listener sets
+ *   `handled` to show the message itself.
  * - `message:reply`: the caller emits `{ to, inReplyTo, body, status }`;
  *   `pi-session-mail` writes a reply from this session and sets `envelope`
  *   (or `error`), as for `message:send`. It answers requests a consumer took

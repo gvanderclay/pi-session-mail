@@ -12,7 +12,7 @@ import { dirname, isAbsolute, join } from "node:path";
 
 import { type MailFile, mailStatus } from "./mail-status.ts";
 
-/** What an envelope is: answered at settle, waited on, plain, or an answer. */
+/** What an envelope is: a request its consuming extension answers, an ask answered at settle, a plain message, or an answer. */
 export type Kind = "request" | "ask" | "message" | "reply";
 const KINDS: readonly Kind[] = ["request", "ask", "message", "reply"];
 

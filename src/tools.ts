@@ -8,8 +8,8 @@
 // `session_mail_ask` leaves an ask. In a session a person is watching it
 // returns at once and the answer arrives as a message; elsewhere it waits, one
 // at a time, for the answer, which comes back as its result. An unattended
-// session must wait because ending its turn ends its work: a delegate's settle
-// is its result, and print mode exits.
+// session must wait because ending its turn ends its work: print mode exits,
+// and an unattended TUI has no person to read a late answer.
 // `session_mail_reply` answers an ask this session received, mid-run; the asks
 // this session owes, and the kind of every envelope it has received, are kept
 // here for it.

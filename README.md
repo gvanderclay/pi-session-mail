@@ -174,8 +174,8 @@ ask that is not waiting (a background ask, or one that timed out, that the
 user stopped, or whose session restarted) is delivered like a message: it
 starts a turn, and its label says the ask is not waiting for it. An
 unattended session waits rather than asking in the background because ending
-its turn ends its work: a delegate's settle is its result, and print mode
-exits.
+its turn ends its work: print mode exits, and an unattended TUI has no person
+to read a late answer.
 
 Every injected message opens with a neutral label: `[mailbox] From <name>
 (<full id>, working in <cwd>), another Pi session on this machine.` The short
@@ -242,15 +242,23 @@ There is no hop count or other limit on chains of mail: sessions can keep waking
 each other. An old envelope that still carries a `hops` property is read and
 delivered like any other, and the property is ignored.
 
-A reply's `status` says how the run ended, not whether the job succeeded.
-Requests, asks and messages carry no status. A reply sent through
-`message:reply` carries the status its consumer gave, one of the three below.
+Requests, asks and messages carry no status. A reply's `status` is one of
+`done`, `stopped` and `failed`.
+
+The answer to an ask, from `session_mail_reply` (always `done`) or at settle,
+uses the status to say how the run ended, not whether the job succeeded, and
+`pi-session-mail` writes the body:
 
 | `status` | Meaning |
 | --- | --- |
 | `done` | the run settled; the body is its answer |
 | `stopped` | the user stopped the run before it settled; the body says so, then the partial text |
 | `failed` | the run did not do the job, and the body says why: either the run ended on an error (such as an API error Pi's retries gave up on), and the body gives the error, then the partial text; or the session was stopped before it read the ask, and nothing was done |
+
+A reply to a request is different: its consumer sets the status and the body
+through [`message:reply`](#messagereply), and `pi-session-mail` writes them as
+given. It adds no wording and waits for nothing. What `done`, `stopped` and
+`failed` mean for a request is for the consumer to define.
 
 ## Pruning
 
@@ -291,9 +299,11 @@ without a key, means that key's default. An unreadable or invalid file, or an
 invalid value, also means the default (30 days), with one warning per
 session. A key this version does not know, such as the former `hopLimit`, is ignored.
 
-The only environment variable it reads is the standard `XDG_STATE_HOME`, at
-every call, to place the mail root (see [How mail works](#how-mail-works)). It
-sets no environment variable of its own.
+It reads two environment variables: the standard `XDG_STATE_HOME`, at every
+call, to place the mail root (see [How mail works](#how-mail-works)), and
+`PI_UNATTENDED`, which `session_mail_ask` checks to tell whether a person is
+watching a TUI session (see [the tools](#running-sessions)). It sets no
+environment variable of its own.
 
 ## Hooks
 
@@ -369,7 +379,7 @@ object before `emit` returns, or sets `error` instead and writes nothing.
 | `to` | consumer | the request's sender: a session id, checked as `message:send` checks it |
 | `inReplyTo` | consumer | the ids of the requests this answers: a non-empty list of non-empty strings, at most 50 |
 | `body` | consumer | the reply text: any string, empty included |
-| `status` | consumer | required: `"done"`, `"stopped"` or `"failed"`, with the meanings in [Envelopes](#envelopes) |
+| `status` | consumer | required: `"done"`, `"stopped"` or `"failed"`; the consumer defines what each means for its request (see [Envelopes](#envelopes)) |
 | `envelope` | provider | the written reply: `id`, `from`, `to`, `kind` (`"reply"`), `in_reply_to`, `status`, `ts`, `body` |
 | `error` | provider | why nothing was written: no active session, an invalid field, or a failed write |
 
@@ -439,7 +449,9 @@ assert.equal(probe.error, undefined);
 ### `message:inbound`
 
 `pi-session-mail` emits this for every claimed envelope before injecting it,
-requests, messages and replies alike.
+requests, asks, messages and replies alike, except the reply to an ask this
+session is waiting on: that goes to the waiting `session_mail_ask` call as its
+result and is neither emitted nor injected.
 
 `pi-session-mail` never emits it from inside a `session_start` handler. Mail
 waiting when a session starts is claimed on a later event-loop turn
@@ -488,7 +500,9 @@ pi.events.on("message:inbound", (payload) => {
 A consumer emits `{}` to have `pi-session-mail` claim the mail waiting in its
 inbox now, instead of at the next watcher event or poll. The listener runs the
 inbox scan synchronously, so every waiting envelope has been emitted as
-`message:inbound` (and delivered) by the time `emit` returns, and then sets
+`message:inbound` (and delivered) by the time `emit` returns, except the
+reply to an ask this session is waiting on, which goes to the waiting
+`session_mail_ask` call instead. The listener then sets
 `scanned` to `true`. **If `scanned` is not set, no provider is installed**,
 and the consumer must not conclude that no reply is waiting.
 
