@@ -6,6 +6,24 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The `message:reply` hook: an extension that took over a request answers it
+  by emitting `{ to, inReplyTo, body, status }`. `pi-session-mail` writes a
+  reply from the current session (the caller cannot set `from`) with that
+  body and status exactly as given, at once, without waiting for the run to
+  settle or using the model's answer, and sets `envelope` or `error` on the
+  payload before `emit` returns, as `message:send` does. `status` is
+  required and is `done`, `stopped` or `failed`; `inReplyTo` is a non-empty
+  list of at most 50 non-empty ids, checked for shape only and not looked up
+  in the mailbox; `body` is any string; `to` is checked as `message:send`
+  checks it. There is no duplicate guard: every valid call writes a reply.
+  With no provider installed, neither field is set. The reply travels like any
+  other: it waits in a closed sender's inbox, and the sender gets it through
+  `message:inbound` with its request copies. Asks are still answered with
+  `session_mail_reply` or at settle. The README documents the hook with a
+  runnable request-to-reply example.
+
 ### Removed
 
 - **Breaking:** the hop limit is gone entirely. There is no per-turn hop

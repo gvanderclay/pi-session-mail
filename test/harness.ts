@@ -260,7 +260,7 @@ export function session(
 		request: (to: string, text: string) => send(sessionId, to, text.trim(), { kind: "request" }),
 		/** Send an ask through `send()`, as `session_mail_ask` writes one, without waiting for its answer. */
 		ask: (to: string, text: string) => send(sessionId, to, text.trim(), { kind: "ask" }),
-		/** Answer requests through `send()`, as the extension that consumes them would: a reply, `done` unless given. */
+		/** A reply fixture written straight through `send()`, `done` unless given; a consumer's real reply goes through `message:reply`. */
 		reply: (to: string, inReplyTo: string[], body: string, status?: string) =>
 			send(sessionId, to, body, { kind: "reply", inReplyTo, ...(status === undefined ? {} : { status }) }),
 		/** Rename the session, as `/name` does, and tell the extension. */

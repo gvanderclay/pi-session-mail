@@ -34,7 +34,7 @@ const BOXES: Box[] = ["tmp", "new", "cur", "sent"];
 const ADDRESS = /^[A-Za-z0-9_-]+$/;
 
 /** The most requests one reply may name; an envelope over this is not read. */
-const MAX_REPLY_IDS = 50;
+export const MAX_REPLY_IDS = 50;
 
 /** An address is a single safe path segment: letters, digits, `-` and `_`. */
 export const isAddress = (value: unknown): value is string => typeof value === "string" && ADDRESS.test(value);

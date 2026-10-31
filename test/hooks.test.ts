@@ -1,4 +1,4 @@
-// The `message:send` and `message:inbound` contracts, run from the worked
+// The `message:send`, `message:reply`, `message:inbound` and `message:scan` contracts, run from the worked
 // examples in `../README.md`. The examples are the documentation: every
 // `` ```js <name> `` fence is extracted and executed verbatim on a real
 // `createEventBus`, so a field renamed in the README without a matching
@@ -54,11 +54,17 @@ const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
 	...args: string[]
 ) => (...args: unknown[]) => Promise<void>;
 
-/** Run one README example with the names its prose promises: `pi`, `peer`, `bareBus`, `assert`. */
-async function runExample(name: string, scope: { pi: unknown; peer: string; bareBus: unknown }) {
+/** Run one README example with the names its prose promises: `pi`, `peer`, `bareBus`, `peerPi`, `assert`. */
+async function runExample(name: string, scope: { pi: unknown; peer: string; bareBus: unknown; peerPi?: unknown }) {
 	const code = examples.get(name);
 	assert.ok(code, `README.md has a \`\`\`js ${name} example`);
-	await new AsyncFunction("pi", "peer", "bareBus", "assert", code)(scope.pi, scope.peer, scope.bareBus, assert);
+	await new AsyncFunction("pi", "peer", "bareBus", "peerPi", "assert", code)(
+		scope.pi,
+		scope.peer,
+		scope.bareBus,
+		scope.peerPi,
+		assert,
+	);
 }
 
 type Sent = { message: { customType: string; content: string; display?: boolean }; options: unknown };
@@ -98,7 +104,7 @@ function session(sessionId: string) {
 		sent,
 		start: () => fire("session_start", { reason: "startup" }),
 		shutdown: () => fire("session_shutdown"),
-		/** Answer requests as the extension that consumes them would: a `done` reply through `send()`. */
+		/** A `done` reply fixture written straight through `send()`; a consumer's real reply goes through `message:reply`. */
 		reply: (to: string, inReplyTo: string[], body: string) => send(sessionId, to, body, { kind: "reply", inReplyTo }),
 	};
 }
@@ -171,7 +177,9 @@ test("the README's message:inbound example takes over a reply, quoting its reque
 		const [request] = envelopes(s.id, "sent");
 		const [requestCopy] = files(s.id, "sent");
 		await until(() => r.sent.length === 1, "r to receive the request");
-		r.reply(s.id, [request.id], "the answer");
+		const answer = { to: s.id, inReplyTo: [request.id], body: "the answer", status: "done" };
+		r.events.emit("message:reply", answer);
+		assert.equal((answer as { error?: string }).error, undefined);
 		await until(() => s.sent.length === 2, "the reply to be injected");
 		assert.deepEqual(
 			s.sent.map((m) => m.message.customType),
@@ -220,6 +228,34 @@ test("the README's message:scan example has a waiting reply emitted as message:i
 	}
 });
 
+test("the README's message:reply example answers a taken-over request, and the reply arrives unchanged", async () => {
+	const s = session(newId("s"));
+	const r = session(newId("r"));
+	await s.start();
+	await r.start();
+	try {
+		await runExample("message:reply", { pi: s.pi, peer: r.id, bareBus: createEventBus(), peerPi: r.pi });
+		const [request] = envelopes(s.id, "sent");
+		assert.equal(request.kind, "request");
+		assert.deepEqual(r.sent, [], "the consumer took the request over, so mailbox injected nothing");
+		assert.deepEqual(files(r.id, "sent"), [], "a reply keeps no sent/ copy");
+		assert.deepEqual(files(r.id, "new"), [], "the invalid reply wrote nothing");
+		assert.equal(s.sent.length, 1, "nothing took the reply over, so mailbox injected it");
+		assert.match(s.sent[0].message.content, new RegExp(`reply to your request ${request.id}`));
+		assert.match(s.sent[0].message.content, /All 42 tests pass\.\n\n\[mailbox\] End of the mail from /);
+		assert.deepEqual(s.sent[0].options, { deliverAs: "followUp" });
+	} finally {
+		await s.shutdown();
+		await r.shutdown();
+	}
+});
+
 test("every runnable example in the README has a runner above", () => {
-	assert.deepEqual([...examples.keys()].sort(), ["message:inbound", "message:scan", "message:send", "no-provider"]);
+	assert.deepEqual([...examples.keys()].sort(), [
+		"message:inbound",
+		"message:reply",
+		"message:scan",
+		"message:send",
+		"no-provider",
+	]);
 });

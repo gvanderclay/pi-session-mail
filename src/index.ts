@@ -14,7 +14,8 @@
 // a label naming the sending session. Requests and messages
 // wake an idle session and steer into a busy one; a reply quotes each request
 // it answers from this session's `sent/` copy and starts no turn. A request
-// gets no automatic answer: the extension that consumes it owns its reply. An
+// gets no automatic answer: the extension that consumes it owns its reply and
+// sends it through `message:reply`. An
 // ask not answered with `session_mail_reply` is answered when the recipient
 // settles, its last answer going back to each sender as one reply — `done`
 // normally, `stopped` when the user stopped the run, with any partial text, or
@@ -41,6 +42,7 @@ import {
 	findSent,
 	isAddress,
 	listNew,
+	MAX_REPLY_IDS,
 	pruneClosed,
 	readEnvelope,
 	readMailbox,
@@ -172,13 +174,28 @@ function inboundText(
  *   replies alike, before injection; `requests` holds a reply's request
  *   copies from this session's `sent/`, and a listener sets `handled` to show
  *   the message itself.
+ * - `message:reply`: the caller emits `{ to, inReplyTo, body, status }`;
+ *   `pi-session-mail` writes a reply from this session and sets `envelope`
+ *   (or `error`), as for `message:send`. It answers requests a consumer took
+ *   over; the ids are checked for shape only, never looked up.
  */
 const SEND = "message:send";
+const REPLY = "message:reply";
+/** The statuses a `message:reply` caller may give, the same as a settled ask's. */
+const REPLY_STATUSES: readonly string[] = ["done", "stopped", "failed"];
 const INBOUND = "message:inbound";
 /** A consumer's request to claim waiting mail now; see the README's `message:scan`. */
 const SCAN = "message:scan";
 
 type SendPayload = { to: unknown; body: unknown; envelope?: Envelope; error?: string };
+type ReplyPayload = {
+	to: unknown;
+	inReplyTo: unknown;
+	body: unknown;
+	status: unknown;
+	envelope?: Envelope;
+	error?: string;
+};
 type InboundPayload = { envelope: Envelope; path: string; requests: SentCopy[]; handled: boolean };
 
 type Message = { role?: string; content?: unknown; stopReason?: unknown; errorMessage?: unknown };
@@ -440,6 +457,31 @@ export default function mailbox(pi: ExtensionAPI) {
 			if (address === undefined) throw new Error("no active session has a mailbox address");
 			if (typeof payload.body !== "string") throw new Error("body must be a string");
 			payload.envelope = send(address, payload.to as string, payload.body, { kind: "request" });
+		} catch (err) {
+			payload.error = (err as Error).message;
+		}
+	});
+
+	// Synchronous on purpose, like `message:send`. The reply is written as the
+	// caller gives it, now: no settle, no assistant text, no added wording, and
+	// no lookup or duplicate guard on `inReplyTo`; the consumer owns all that.
+	pi.events.on(REPLY, (data) => {
+		const payload = data as ReplyPayload;
+		if (typeof payload !== "object" || payload === null) return;
+		try {
+			if (address === undefined) throw new Error("no active session has a mailbox address");
+			const ids = payload.inReplyTo;
+			if (!Array.isArray(ids) || ids.length === 0 || !ids.every((id) => typeof id === "string" && id !== ""))
+				throw new Error("inReplyTo must be a non-empty list of non-empty request ids");
+			if (ids.length > MAX_REPLY_IDS) throw new Error(`inReplyTo names more than ${MAX_REPLY_IDS} requests`);
+			if (typeof payload.body !== "string") throw new Error("body must be a string");
+			if (typeof payload.status !== "string" || !REPLY_STATUSES.includes(payload.status))
+				throw new Error(`status must be one of ${REPLY_STATUSES.map((s) => JSON.stringify(s)).join(", ")}`);
+			payload.envelope = send(address, payload.to as string, payload.body, {
+				kind: "reply",
+				inReplyTo: [...ids],
+				status: payload.status,
+			});
 		} catch (err) {
 			payload.error = (err as Error).message;
 		}

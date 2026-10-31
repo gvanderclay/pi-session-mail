@@ -7,7 +7,8 @@ running session with `/mailbox:send`, and the model lists, asks, answers and
 sends through four `session_mail_*` tools. Mail waits on disk until the
 recipient starts or resumes. An ask's answer goes back to its sender
 automatically; a request another extension sends through `message:send` gets
-no automatic answer, because the extension that consumes it owns its reply.
+no automatic answer, because the extension that consumes it owns its reply and
+sends it through `message:reply`.
 
 ## Install
 
@@ -105,7 +106,8 @@ is still waiting on becomes that sender's `session_mail_ask` result.
 
 A request gets no automatic answer: not when its run completes, stops or
 fails, not when the session never read it, and not when a `message:inbound`
-listener took it over. The extension that consumes it owns its reply. Replies
+listener took it over. The extension that consumes it owns its reply, and
+sends it with the [`message:reply`](#messagereply) hook. Replies
 and messages are never answered.
 
 ## Running sessions
@@ -158,7 +160,7 @@ A `to` given to a tool resolves as follows:
 | `request` | `message:send` | `triggerTurn`, `deliverAs: "steer"` | never automatically; the extension that consumes it replies |
 | `ask` | `session_mail_ask` | `triggerTurn`, `deliverAs: "steer"` | yes, with `session_mail_reply` or when the run settles |
 | `message` | `session_mail_send`, `/mailbox:send` | `triggerTurn`, `deliverAs: "steer"` | never |
-| `reply` | the answering session | `deliverAs: "followUp"`, no turn; see below for answers to asks | never |
+| `reply` | the answering session: `session_mail_reply` or settle for an ask, `message:reply` for a request | `deliverAs: "followUp"`, no turn; see below for answers to asks | never |
 
 Mail for the model wakes an idle session, and reaches a busy one at its next
 gap between tool calls rather than after the run. It is never held back while
@@ -241,7 +243,8 @@ each other. An old envelope that still carries a `hops` property is read and
 delivered like any other, and the property is ignored.
 
 A reply's `status` says how the run ended, not whether the job succeeded.
-Requests, asks and messages carry no status.
+Requests, asks and messages carry no status. A reply sent through
+`message:reply` carries the status its consumer gave, one of the three below.
 
 | `status` | Meaning |
 | --- | --- |
@@ -297,7 +300,7 @@ sets no environment variable of its own.
 Other extensions integrate through the `pi.events` hooks below. They never
 import this package or read its files.
 
-`pi-session-mail` provides all three hooks and consumes none. All three depend
+`pi-session-mail` provides all four hooks and consumes none. All four depend
 on listeners doing all their work **synchronously**: the emitter reads the
 results off the payload the moment `emit` returns, so a listener must finish
 before its first `await`.
@@ -306,7 +309,9 @@ The `js` blocks below are the contract's worked examples, and
 `test/hooks.test.ts` extracts and runs them verbatim, one per block, on a real
 `createEventBus`. Their scope is the test harness's: `pi` is the extension
 API, `peer` is another session's address, `bareBus` is an event bus with no
-`message:send` provider, and `assert` is `node:assert/strict`. Write them as
+`message:send` provider, `peerPi` is the extension API of the session at
+`peer` (in the examples that need both ends), and `assert` is
+`node:assert/strict`. Write them as
 plain JavaScript so they stay runnable; the name after `js` is the test that
 runs that block.
 
@@ -329,7 +334,7 @@ refuse rather than pretend the message was sent.
 The request's `id` is what a reply names in its `in_reply_to`, so a consumer
 that wants its answers back should keep it. `pi-session-mail` never answers a
 request by itself: the extension that consumes it in the recipient session
-sends any reply.
+sends any reply, through [`message:reply`](#messagereply).
 
 ```js message:send
 // Send a request from this session and keep the id a reply will name.
@@ -347,6 +352,86 @@ assert.equal("hops" in payload.envelope, false);
 // With no `message:send` provider installed, neither field is set.
 const probe = { to: peer, body: "hello" };
 bareBus.emit("message:send", probe);
+assert.equal(probe.envelope, undefined);
+assert.equal(probe.error, undefined);
+```
+
+### `message:reply`
+
+A consumer that took over a request emits `{ to, inReplyTo, body, status }` to
+answer it, whenever its work is done. A provider writes a reply (`kind:
+"reply"`) from its own session's address and sets `envelope` on the same
+object before `emit` returns, or sets `error` instead and writes nothing.
+**If neither is set, no provider is installed**, as with `message:send`.
+
+| Field | Set by | Meaning |
+| --- | --- | --- |
+| `to` | consumer | the request's sender: a session id, checked as `message:send` checks it |
+| `inReplyTo` | consumer | the ids of the requests this answers: a non-empty list of non-empty strings, at most 50 |
+| `body` | consumer | the reply text: any string, empty included |
+| `status` | consumer | required: `"done"`, `"stopped"` or `"failed"`, with the meanings in [Envelopes](#envelopes) |
+| `envelope` | provider | the written reply: `id`, `from`, `to`, `kind` (`"reply"`), `in_reply_to`, `status`, `ts`, `body` |
+| `error` | provider | why nothing was written: no active session, an invalid field, or a failed write |
+
+The hook is for answering requests. The reply's `from` is always this
+session; a `from` on the payload is ignored. `body` and `status` are written
+exactly as given: the reply does not wait for the run to settle, does not use
+the model's answer and adds no wording. `inReplyTo` is checked for shape only:
+its ids are not looked up in this session's mailbox, so the hook does not
+check that they name requests this session received. Nothing stops a second
+reply to the same request either: every valid call writes one, and the
+consumer makes sure it answers once. An ask is answered with
+`session_mail_reply` or at settle, never through this hook, which leaves an
+ask's bookkeeping alone.
+
+The reply goes through the mailbox like any other: one the sender is not
+running to receive waits in its inbox and is claimed when it starts again.
+The sender then gets it through `message:inbound` with its `requests` copies,
+and a listener there can take it over.
+
+```js message:reply
+// The consumer in the peer session takes over the requests it receives.
+const taken = [];
+peerPi.events.on("message:inbound", (inbound) => {
+  if (inbound.handled || inbound.envelope.kind !== "request") return;
+  inbound.handled = true;
+  taken.push(inbound.envelope);
+});
+
+// This session sends a request, and the peer claims it now.
+const request = { to: peer, body: "Please run the test suite." };
+pi.events.emit("message:send", request);
+peerPi.events.emit("message:scan", {});
+assert.equal(taken.length, 1);
+
+// When its work is done, the consumer answers from the peer session.
+const reply = { to: taken[0].from, inReplyTo: [taken[0].id], body: "All 42 tests pass.", status: "done" };
+peerPi.events.emit("message:reply", reply);
+assert.equal(reply.error, undefined);
+assert.ok(reply.envelope, "a provider sets `envelope` before `emit` returns");
+assert.equal(reply.envelope.kind, "reply");
+assert.equal(reply.envelope.from, peer);
+
+// The reply reaches this session through `message:inbound`, unchanged.
+const replies = [];
+pi.events.on("message:inbound", (inbound) => replies.push(inbound));
+pi.events.emit("message:scan", {});
+assert.equal(replies.length, 1);
+const [{ envelope, requests }] = replies;
+assert.deepEqual(envelope.in_reply_to, [request.envelope.id]);
+assert.equal(envelope.body, "All 42 tests pass.");
+assert.equal(envelope.status, "done");
+assert.equal(requests[0].envelope.id, request.envelope.id);
+
+// Invalid input sets `error` and writes nothing.
+const unknown = { to: peer, inReplyTo: [request.envelope.id], body: "?", status: "maybe" };
+pi.events.emit("message:reply", unknown);
+assert.equal(unknown.envelope, undefined);
+assert.match(unknown.error, /status/);
+
+// With no provider installed, neither field is set.
+const probe = { to: peer, inReplyTo: [request.envelope.id], body: "hello", status: "done" };
+bareBus.emit("message:reply", probe);
 assert.equal(probe.envelope, undefined);
 assert.equal(probe.error, undefined);
 ```
@@ -436,8 +521,8 @@ assert.equal(probe.scanned, undefined);
 Sessions running older and newer copies of `pi-session-mail` share one mail
 root, and other extensions depend on its hooks, so these are stable:
 
-- The three hooks, `message:send`, `message:inbound` and `message:scan`, and
-  their payloads as [Hooks](#hooks) describes them.
+- The four hooks, `message:send`, `message:reply`, `message:inbound` and
+  `message:scan`, and their payloads as [Hooks](#hooks) describes them.
 - The `[mailbox] From …` label and the `[mailbox] End of the mail …` line that
   frame injected mail.
 - The mail root path, `$XDG_STATE_HOME/pi-session-mail/`, or

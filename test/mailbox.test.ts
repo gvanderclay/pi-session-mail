@@ -457,7 +457,9 @@ test("a request gets no automatic answer when the recipient settles, and a consu
 	await b.agentEnd("It is 4.");
 	await b.settle();
 	assert.deepEqual(files(a.id, "new"), []);
-	b.reply(a.id, [request.id], "It is 4.");
+	const payload: { error?: string } = { to: a.id, inReplyTo: [request.id], body: "It is 4.", status: "done" } as never;
+	b.events.emit("message:reply", payload);
+	assert.equal(payload.error, undefined);
 	const [reply] = envelopes(a.id, "new");
 	assert.equal(reply.from, b.id);
 	assert.equal(reply.to, a.id);
