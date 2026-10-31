@@ -75,14 +75,15 @@ function cap(text: string, max: number): string | undefined {
  */
 const plain = (text: string): string => text.replace(/[\p{Cc}\u2028\u2029]/gu, " ");
 
-/** A reply quotes each request it answers: the id, the copy's path, then the capped body. */
+/** A reply quotes each request or ask it answers: the id, the copy's path, then the capped body. */
 function quoteRequest(request: SentCopy): string {
+	const ask = request.envelope.kind === "ask";
 	const cut = cap(request.envelope.body, QUOTE_CAP);
 	const body =
 		cut === undefined
 			? request.envelope.body
-			: `${cut}\n[mailbox] Request cut at 2 KiB; the full copy is ${plain(request.path)}`;
-	return `[mailbox] Your request ${plain(request.envelope.id)}, quoted from ${plain(request.path)}:\n${body
+			: `${cut}\n[mailbox] ${ask ? "Ask" : "Request"} cut at 2 KiB; the full copy is ${plain(request.path)}`;
+	return `[mailbox] Your ${ask ? "ask" : "request"} ${plain(request.envelope.id)}, quoted from ${plain(request.path)}:\n${body
 		.split("\n")
 		.map((line) => `> ${line}`)
 		.join("\n")}`;
@@ -136,10 +137,10 @@ function inboundText(
 	envelope: Envelope,
 	path: string,
 	quotes: readonly string[],
-	opts: { lateAnswer: boolean; byUser: boolean },
+	opts: { lateAnswer: boolean; byUser: boolean; answersAsks: boolean },
 	senderRecord: RunningRecord | undefined,
 ): string {
-	const { lateAnswer, byUser } = opts;
+	const { lateAnswer, byUser, answersAsks } = opts;
 	const sender = senderLine(envelope.from, senderRecord);
 	const id = plain(envelope.id);
 	const replyIds = envelope.in_reply_to.map(plain);
@@ -152,7 +153,9 @@ function inboundText(
 	if (envelope.kind === "message")
 		header.push(`It expects no answer; if one is wanted, send it with session_mail_send to ${envelope.from}.`);
 	if (envelope.in_reply_to.length > 0)
-		header.push(`It is a reply to your request${envelope.in_reply_to.length > 1 ? "s" : ""} ${replyIds.join(", ")}.`);
+		header.push(
+			`It is a reply to your ${answersAsks ? "ask" : "request"}${envelope.in_reply_to.length > 1 ? "s" : ""} ${replyIds.join(", ")}.`,
+		);
 	if (byUser)
 		header.push("The user made that request, typing it with /mailbox or through an extension such as delegate.");
 	if (envelope.in_reply_to.length > 0 && envelope.status !== "done")
@@ -395,6 +398,9 @@ export default function mailbox(pi: ExtensionAPI) {
 		const lateAnswer = envelope.kind === "reply" && requests.some((copy) => copy.envelope.kind === "ask");
 		const wakes = envelope.kind !== "reply" || lateAnswer;
 		const byUser = envelope.kind === "reply" && requests.some((copy) => copy.envelope.kind === "request");
+		// The label says "ask" only when every id it answers is a known ask; otherwise "request", as before.
+		const answersAsks =
+			requests.length === envelope.in_reply_to.length && requests.every((copy) => copy.envelope.kind === "ask");
 		// Listeners run synchronously inside emit, so `handled` is final when it returns.
 		const inbound: InboundPayload = { envelope, path, requests, handled: false };
 		pi.events.emit(INBOUND, inbound);
@@ -415,7 +421,7 @@ export default function mailbox(pi: ExtensionAPI) {
 					envelope,
 					path,
 					quotes,
-					{ lateAnswer, byUser },
+					{ lateAnswer, byUser, answersAsks },
 					listRunning().find((r) => r.address === envelope.from),
 				),
 				display: true,
