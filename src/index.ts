@@ -31,7 +31,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { mailStatus } from "./mail-status.ts";
 import { type Peer, type PickerFilter, type PickerItem, type PickResult, picker } from "./picker.ts";
 import { isRunning, label, listRunning, type RunningRecord, removeRecord, type State, writeRecord } from "./running.ts";
-import { type SettleInput, settle } from "./settle.ts";
+import { type Reply, type SettleInput, settleAsks, settleRequests } from "./settle.ts";
 import {
 	boxPath,
 	claim,
@@ -222,10 +222,11 @@ export default function mailbox(pi: ExtensionAPI) {
 	let timer: ReturnType<typeof setInterval> | undefined;
 	/** Envelope ids already handed to Pi in this process. */
 	const delivered = new Set<string>();
+	/** Ids of owed mail (requests and asks) whose message entered the conversation (or a listener took over). */
+	let seen = new Set<string>();
+	// Request-only state: owed and held. Asks keep theirs in `tools` (`takeOwedAsks`).
 	/** Request ids awaiting this session's reply, keyed by sender. In memory only. */
 	let owed = new Map<string, string[]>();
-	/** Owed request ids whose message entered the conversation (or a listener took over). */
-	let seen = new Set<string>();
 	/**
 	 * Request ids held across a stop: the user stopped a run while they were
 	 * owed, so they wait, still owed, for the next run that completes.
@@ -395,9 +396,9 @@ export default function mailbox(pi: ExtensionAPI) {
 		// Listeners run synchronously inside emit, so `handled` is final when it returns.
 		const inbound: InboundPayload = { envelope, path, requests, handled: false };
 		pi.events.emit(INBOUND, inbound);
-		// Only requests arm an answer: replies are never answered, and messages
-		// expect none. A request arms one even when a listener took over its display.
-		if (envelope.kind === "request") owed.set(envelope.from, [...(owed.get(envelope.from) ?? []), envelope.id]);
+		// Only requests and asks arm an answer: replies are never answered, and
+		// messages expect none. A request arms one even when a listener took over its display.
+		oweRequest(envelope);
 		tools?.armAsk(envelope);
 		// Mail that wakes or steers the session raises its count; a reply shown
 		// quietly starts no turn, but one a listener took over may.
@@ -427,6 +428,25 @@ export default function mailbox(pi: ExtensionAPI) {
 			// shows itself, and starts no turn.
 			wakes ? { triggerTurn: true, deliverAs: "steer" } : { deliverAs: "followUp" },
 		);
+	}
+
+	/** Request-only: a request is owed an answer to its sender. */
+	function oweRequest(envelope: Envelope) {
+		if (envelope.kind === "request") owed.set(envelope.from, [...(owed.get(envelope.from) ?? []), envelope.id]);
+	}
+
+	/** Request-only: forget what is owed and held, as a new session starts. */
+	function resetRequests() {
+		owed = new Map();
+		held = new Set();
+	}
+
+	/** Request-only: decide the replies to the requests, and keep what stays owed and held. */
+	function settleOwedRequests(run: Pick<SettleInput, "end" | "answer">): Reply[] {
+		const decision = settleRequests({ requests: owed, seen, held, ...run });
+		owed = decision.owed;
+		held = decision.held;
+		return decision.replies;
 	}
 
 	/** Claim and deliver everything in `new/`, in name order. Synchronous, so scans never overlap. */
@@ -497,9 +517,8 @@ export default function mailbox(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, context) => {
 		stop();
 		ctx = context;
-		owed = new Map();
+		resetRequests();
 		seen = new Set();
-		held = new Set();
 		lastAnswer = undefined;
 		lastAborted = false;
 		lastError = undefined;
@@ -614,16 +633,9 @@ export default function mailbox(pi: ExtensionAPI) {
 			: lastError !== undefined
 				? { kind: "failed", error: lastError }
 				: { kind: "done" };
-		const decision = settle({
-			requests: owed,
-			asks: tools?.takeOwedAsks() ?? new Map(),
-			seen,
-			held,
-			end,
-			answer: lastAnswer,
-		});
-		owed = decision.owed;
-		held = decision.held;
+		const run = { end, answer: lastAnswer };
+		const requestReplies = settleOwedRequests(run);
+		const askReplies = settleAsks({ asks: tools?.takeOwedAsks() ?? new Map(), seen, ...run });
 		seen = new Set();
 		lastAnswer = undefined;
 		lastAborted = false;
@@ -632,7 +644,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		state = "idle";
 		announce();
 		if (me === undefined) return;
-		for (const reply of decision.replies) {
+		for (const reply of [...requestReplies, ...askReplies]) {
 			const { to } = reply;
 			try {
 				// Answers are never refused by the hop limit.
