@@ -6,6 +6,18 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking:** the hop limit is gone entirely. There is no per-turn hop
+  count, `hops` is no longer written to new envelopes or part of the
+  supported envelope, `session_mail_send` and `session_mail_ask` are never
+  refused because of hops, and the `hopLimit` setting in `session-mail.json`
+  has no effect (no migration; `pruneAfterDays` is unchanged). No other loop
+  guard replaces it: sessions can keep waking each other, which is accepted.
+  An old stored envelope with a `hops` property is still read and delivered;
+  the property is ignored. The test that pinned the old behaviour changed with
+  it.
+
 ## [0.5.0] - 2026-10-23
 
 ### Changed

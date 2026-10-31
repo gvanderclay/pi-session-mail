@@ -12,25 +12,19 @@
 // is its result, and print mode exits.
 // `session_mail_reply` answers an ask this session received, mid-run; the asks
 // this session owes, and the kind of every envelope it has received, are kept
-// here for it. Mail a
-// tool sends carries the turn's hop count and is refused once the count
-// reaches `hopLimit` from `<agent dir>/session-mail.json`.
+// here for it.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { DEFAULT_HOP_LIMIT, DEFAULT_PRUNE_AFTER_DAYS, parseConfig } from "./config.ts";
+import { DEFAULT_PRUNE_AFTER_DAYS, parseConfig } from "./config.ts";
 import { label, listRunning, type RunningRecord, resolveTo } from "./running.ts";
 import { type Envelope, send } from "./store.ts";
 
 /** What the tools need from the extension around them. */
 export type ToolHooks = {
-	/** The current turn's hop count, which mail sent now carries. */
-	hops: () => number;
-	/** Report a broken `session-mail.json`; the extension shows one warning per session. */
-	configProblem: (message: string) => void;
 	/** The address this session's ask now waits on, or "" when it waits on none; written to its running record. */
 	waitingOn: (address: string) => void;
 };
@@ -101,7 +95,7 @@ const NOT_AN_ASK: Record<Exclude<Envelope["kind"], "ask">, string> = {
  * The settings from `<agent dir>/session-mail.json`, read at each call; each
  * problem goes to `onProblem`, which the extension shows once per session.
  */
-export function readSettings(onProblem: (message: string) => void): { hopLimit: number; pruneAfterDays: number } {
+export function readSettings(onProblem: (message: string) => void): { pruneAfterDays: number } {
 	const path = join(getAgentDir(), "session-mail.json");
 	let text: string | undefined;
 	try {
@@ -109,22 +103,13 @@ export function readSettings(onProblem: (message: string) => void): { hopLimit: 
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code !== "ENOENT")
 			onProblem(
-				`could not read ${path} (${(err as Error).message}); using the hop limit ${DEFAULT_HOP_LIMIT} and pruning after ${DEFAULT_PRUNE_AFTER_DAYS} days`,
+				`could not read ${path} (${(err as Error).message}); using the default, pruning after ${DEFAULT_PRUNE_AFTER_DAYS} days`,
 			);
 		text = undefined;
 	}
 	const { problems, ...settings } = parseConfig(text, path);
 	for (const problem of problems) onProblem(problem);
 	return settings;
-}
-
-/** Refuse, before anything is written, once the turn's hop count has reached the limit. */
-function checkHops(hops: number, hooks: ToolHooks): void {
-	const limit = readSettings(hooks.configProblem).hopLimit;
-	if (hops < limit) return;
-	throw new Error(
-		`nothing was sent: this turn is ${hops} hops into a chain of sessions waking each other with nobody typing, and the hop limit of ${limit} is reached. A person typing in either session starts the count again.`,
-	);
 }
 
 /**
@@ -219,8 +204,7 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 		const from = [...owedAsks].find(([, ids]) => ids.includes(id))?.[0];
 		// An answered ask, by this tool or at settle, is no longer owed.
 		if (from === undefined) throw new Error(`ask ${id} is already answered; nothing was sent`);
-		// Answers carry the turn's count and are never refused by the hop limit.
-		const answer = send(me, from, body, { kind: "reply", hops: hooks.hops(), inReplyTo: [id], status: "done" });
+		const answer = send(me, from, body, { kind: "reply", inReplyTo: [id], status: "done" });
 		const rest = (owedAsks.get(from) ?? []).filter((owedId) => owedId !== id);
 		if (rest.length > 0) owedAsks.set(from, rest);
 		else owedAsks.delete(from);
@@ -287,9 +271,7 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 			const body = typeof params.message === "string" ? params.message.trim() : "";
 			if (body === "") throw new Error("the message is empty; nothing was sent");
 			const to = resolveTo(typeof params.to === "string" ? params.to : "", me);
-			const hops = hooks.hops();
-			checkHops(hops, hooks);
-			const envelope = send(me, to, body, { kind: "message", hops });
+			const envelope = send(me, to, body, { kind: "message" });
 			const target = listRunning().find((record) => record.address === to);
 			const text =
 				target === undefined
@@ -340,9 +322,7 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 				throw new Error(
 					`nothing was sent: ${target} is waiting on an answer from this session, so asking it back would leave both waiting; answer it first`,
 				);
-			const hops = hooks.hops();
-			checkHops(hops, hooks);
-			const ask = send(me, to, body, { kind: "ask", hops });
+			const ask = send(me, to, body, { kind: "ask" });
 			const outcome: AskOutcome = attended(ctx)
 				? { outcome: "background" }
 				: await new Promise<AskOutcome>((resolve) => {

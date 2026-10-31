@@ -125,7 +125,7 @@ test("the README's message:send example writes a request the sender keeps a copy
 		assert.equal(envelope.to, b.id);
 		assert.equal(envelope.body, "Please run the test suite.");
 		assert.equal(envelope.kind, "request");
-		assert.equal(envelope.hops, 0);
+		assert.equal("hops" in envelope, false);
 		assert.deepEqual(envelopes(a.id, "sent"), [envelope]);
 	} finally {
 		await a.shutdown();

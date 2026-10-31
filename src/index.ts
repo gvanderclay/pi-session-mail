@@ -167,8 +167,7 @@ function inboundText(
  * synchronous code before `emit` returns; do all work before any `await`.
  *
  * - `message:send`: the caller emits `{ to, body }`; `pi-session-mail` writes a
- *   request, stamped with the run's hop count during a run and 0 when idle,
- *   and sets `envelope` (or `error`) on the same object. Neither set means no
+ *   request and sets `envelope` (or `error`) on the same object. Neither set means no
  *   provider is installed.
  * - `message:inbound`: emitted for every claimed envelope, requests and
  *   replies alike, before injection; `requests` holds a reply's request
@@ -240,12 +239,6 @@ export default function mailbox(pi: ExtensionAPI) {
 	let lastError: string | undefined;
 	/** Ids of injected mail that has not entered the conversation yet, for the status's unread count. */
 	let unread = new Set<string>();
-	/**
-	 * The hop count of the current turn: 0 once the user starts or steers it,
-	 * otherwise the highest `hops` + 1 among the envelopes that started or
-	 * steered into it. Mail sent from the turn carries it.
-	 */
-	let hops = 0;
 	/** The problems with `session-mail.json` this session has already warned about. */
 	let configWarned = new Set<string>();
 	/** What this session's running-session record says. */
@@ -400,9 +393,6 @@ export default function mailbox(pi: ExtensionAPI) {
 		// messages expect none. A request arms one even when a listener took over its display.
 		oweRequest(envelope);
 		tools?.armAsk(envelope);
-		// Mail that wakes or steers the session raises its count; a reply shown
-		// quietly starts no turn, but one a listener took over may.
-		if (wakes || inbound.handled) hops = Math.max(hops, envelope.hops + 1);
 		// `pi-session-mail` cannot observe a listener's own message, so a takeover counts as seen.
 		if (inbound.handled) {
 			seen.add(envelope.id);
@@ -478,11 +468,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		try {
 			if (address === undefined) throw new Error("no active session has a mailbox address");
 			if (typeof payload.body !== "string") throw new Error("body must be a string");
-			// During a run the caller is the model acting through an extension, so the
-			// request continues the run's chain; idle, it acts for the user and starts a
-			// fresh one. It is never refused here: the receiving side enforces the limit.
-			const hopsNow = state === "busy" ? hops : 0;
-			payload.envelope = send(address, payload.to as string, payload.body, { kind: "request", hops: hopsNow });
+			payload.envelope = send(address, payload.to as string, payload.body, { kind: "request" });
 		} catch (err) {
 			payload.error = (err as Error).message;
 		}
@@ -523,7 +509,6 @@ export default function mailbox(pi: ExtensionAPI) {
 		lastAborted = false;
 		lastError = undefined;
 		unread = new Set();
-		hops = 0;
 		tools?.abandonAsk();
 		waitingOn = "";
 		configWarned = new Set();
@@ -582,12 +567,6 @@ export default function mailbox(pi: ExtensionAPI) {
 		if (unread.delete(message.details.id)) updateStatus();
 	});
 
-	// Typed text, RPC input and a prompt a command sends all come from the
-	// user, so each starts the chain again.
-	pi.on("input", async () => {
-		hops = 0;
-	});
-
 	pi.on("session_info_changed", async (event) => {
 		name = event.name || undefined;
 		announce();
@@ -625,9 +604,6 @@ export default function mailbox(pi: ExtensionAPI) {
 	// queued follow-up after `agent_end` would otherwise get a premature answer.
 	pi.on("agent_settled", async () => {
 		const me = address;
-		// Answers carry the settled turn's count; the next turn counts afresh.
-		const answerHops = hops;
-		hops = 0;
 		const end: SettleInput["end"] = lastAborted
 			? { kind: "stopped" }
 			: lastError !== undefined
@@ -647,8 +623,7 @@ export default function mailbox(pi: ExtensionAPI) {
 		for (const reply of [...requestReplies, ...askReplies]) {
 			const { to } = reply;
 			try {
-				// Answers are never refused by the hop limit.
-				send(me, to, reply.body, { kind: "reply", hops: answerHops, inReplyTo: reply.ids, status: reply.status });
+				send(me, to, reply.body, { kind: "reply", inReplyTo: reply.ids, status: reply.status });
 			} catch (err) {
 				warn(`could not reply to ${to}: ${(err as Error).message}`);
 			}
@@ -675,8 +650,6 @@ export default function mailbox(pi: ExtensionAPI) {
 			waitingOn = to;
 			announce();
 		},
-		hops: () => hops,
-		configProblem,
 	});
 
 	pi.registerCommand("mailbox", {
@@ -733,7 +706,7 @@ export default function mailbox(pi: ExtensionAPI) {
 			const text = (await context.ui.input("Message", "type a message"))?.trim();
 			if (text === undefined || text === "") return;
 			try {
-				const envelope = send(me, target.address, text, { kind: "message", hops: 0 });
+				const envelope = send(me, target.address, text, { kind: "message" });
 				context.ui.notify(`Sent ${envelope.id} to ${envelope.to}`, "info");
 			} catch (err) {
 				context.ui.notify(`mailbox: ${(err as Error).message}`, "error");

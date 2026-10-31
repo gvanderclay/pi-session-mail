@@ -71,7 +71,7 @@ async function withFreshState(body: () => Promise<void>) {
 	}
 }
 
-test("/mailbox:send offers every other running session and writes a message with hops 0", () =>
+test("/mailbox:send offers every other running session and writes a message", () =>
 	withFreshState(async () => {
 		const a = session(newId(), { name: "alpha", cwd: "/work/a" });
 		const b = session(newId(), { name: "bravo", cwd: "/work/b" });
@@ -86,7 +86,7 @@ test("/mailbox:send offers every other running session and writes a message with
 		assert.equal(env.from, a.id);
 		assert.equal(env.to, b.id);
 		assert.equal(env.kind, "message");
-		assert.equal(env.hops, 0);
+		assert.equal("hops" in env, false);
 		assert.equal(env.body, "hello there");
 		assert.deepEqual(envelopes(a.id, "sent"), [env]);
 		assert.deepEqual(envelopes(c.id, "new"), []);
@@ -150,7 +150,7 @@ test("a request writes to the recipient's new/ and the sender's sent/", async ()
 	assert.equal(env.to, b);
 	assert.deepEqual(env.in_reply_to, []);
 	assert.equal(env.kind, "request");
-	assert.equal(env.hops, 0);
+	assert.equal("hops" in env, false);
 	assert.equal(env.status, "");
 	assert.equal(env.body, "hello there");
 	assert.match(env.id, /^[0-9a-f-]{36}$/);
@@ -459,7 +459,7 @@ test("a request is answered once the recipient settles, not at agent_end, and th
 	assert.equal(reply.to, a.id);
 	assert.equal(reply.status, "done");
 	assert.equal(reply.kind, "reply");
-	assert.equal(reply.hops, 1); // the request (hop 0) started this turn
+	assert.equal("hops" in reply, false);
 	assert.deepEqual(reply.in_reply_to, [request.id]);
 	assert.equal(reply.body, "It is 4.");
 	assert.equal(files(b.id, "sent").length, 0);
@@ -520,8 +520,8 @@ test("replies are never answered, and a settle with nothing pending sends nothin
 	assert.equal(files(a.id, "new").length, 0);
 });
 
-test("an envelope written before kind and hops is read as a request or a reply by in_reply_to, with hops 0", async () => {
-	type Inbound = { envelope: { kind: string; hops: number; in_reply_to: string[] } };
+test("an envelope written before kind is read as a request or a reply by in_reply_to", async () => {
+	type Inbound = { envelope: { kind: string; in_reply_to: string[] } };
 	const b = session(newId("b"));
 	const seen: Inbound[] = [];
 	b.events.on("message:inbound", (p) => void seen.push(p as Inbound));
@@ -543,11 +543,8 @@ test("an envelope written before kind and hops is read as a request or a reply b
 	await b.answer("answered");
 	await b.shutdown();
 	assert.deepEqual(
-		seen.map((p) => [p.envelope.kind, p.envelope.hops]),
-		[
-			["request", 0],
-			["reply", 0],
-		],
+		seen.map((p) => p.envelope.kind),
+		["request", "reply"],
 	);
 	const [reply] = envelopes(a, "new");
 	assert.deepEqual(reply.in_reply_to, ["old-request"]);
@@ -621,18 +618,21 @@ test("control characters in an id, a name and a working directory never start a 
 	}
 });
 
-test("an envelope with a bad hop count is set aside with a warning", async () => {
+test("an envelope with an invalid hops value is delivered like any other, the property ignored", async () => {
 	const b = session(newId("b"));
 	const a = newId("a");
 	mkdirSync(box(b.id, "new"), { recursive: true, mode: 0o700 });
-	const bad = (id: string, extra: object) =>
+	const old = (id: string, extra: object) =>
 		JSON.stringify({ id, from: a, to: b.id, in_reply_to: [], status: "", ts: "", body: "x", ...extra });
-	writeFileSync(join(box(b.id, "new"), "000000000000002-h.json"), bad("h", { kind: "request", hops: -1 }));
+	writeFileSync(join(box(b.id, "new"), "000000000000002-h.json"), old("h", { kind: "request", hops: -1 }));
 	await b.start();
+	assert.equal(b.sent.length, 1);
+	await b.answer("answered");
 	await b.shutdown();
-	assert.equal(b.sent.length, 0);
-	assert.equal(b.warnings.length, 1);
-	assert.match(b.warnings[0], /invalid hops -1/);
+	assert.deepEqual(b.warnings, []);
+	const [reply] = envelopes(a, "new");
+	assert.deepEqual(reply.in_reply_to, ["h"]);
+	assert.equal("hops" in reply, false);
 });
 
 test("an envelope with an unknown kind is delivered as a message, waking the session and expecting no answer", async () => {
@@ -669,7 +669,7 @@ test("an envelope with an unknown kind is delivered as a message, waking the ses
 	assert.deepEqual(b.warnings, []);
 });
 
-test("a message:send emitted during a run carries the run's hops and is refused past the limit as a loop", async () => {
+test("a message:send is never refused for a chain of mail, and writes a request without hops, during a run or idle", async () => {
 	const a = session(newId("a"));
 	const b = session(newId("b"));
 	await a.start();
@@ -684,49 +684,28 @@ test("a message:send emitted during a run carries the run's hops and is refused 
 			in_reply_to: [],
 			status: "",
 			ts: "",
-			body: "hop 4",
+			body: "from an older copy",
 			kind: "message",
-			hops: 4,
+			hops: 50,
 		}),
 	);
 	await until(() => a.sent.length === 1, "the message to be injected");
-	const payload: SendPayload = { to: b.id, body: "continue the chain" };
-	a.events.emit("message:send", payload);
-	assert.equal(payload.error, undefined);
-	assert.equal(payload.envelope?.hops, 5);
-	assert.equal(payload.envelope?.kind, "request");
+	const running: SendPayload = { to: b.id, body: "continue the chain" };
+	a.events.emit("message:send", running);
+	assert.equal(running.error, undefined);
+	assert.equal(running.envelope?.kind, "request");
+	assert.equal("hops" in (running.envelope ?? {}), false);
 	await b.start();
 	await b.agentStart();
 	await until(() => b.sent.length === 1, "the request to be injected");
-	await assert.rejects(b.toolCall("session_mail_send", { to: newId(), message: "again" }), /hop limit of 5/);
+	await b.toolCall("session_mail_send", { to: newId(), message: "again" });
+	await a.settle();
+	const idle: SendPayload = { to: b.id, body: "from the user" };
+	a.events.emit("message:send", idle);
+	assert.equal(idle.error, undefined);
+	assert.equal("hops" in (idle.envelope ?? {}), false);
 	await a.shutdown();
 	await b.shutdown();
-});
-
-test("a message:send emitted while idle carries hops 0 even when mail raised the count", async () => {
-	const a = session(newId("a"));
-	const b = newId("b");
-	mkdirSync(box(a.id, "new"), { recursive: true, mode: 0o700 });
-	writeFileSync(
-		join(box(a.id, "new"), "000000000000001-p.json"),
-		JSON.stringify({
-			id: "p",
-			from: newId(),
-			to: a.id,
-			in_reply_to: [],
-			status: "",
-			ts: "",
-			body: "hop 3",
-			kind: "message",
-			hops: 3,
-		}),
-	);
-	await a.start();
-	assert.equal(a.sent.length, 1); // woke the idle session, which has not started its run yet
-	const payload: SendPayload = { to: b, body: "from the user" };
-	a.events.emit("message:send", payload);
-	assert.equal(payload.envelope?.hops, 0);
-	await a.shutdown();
 });
 
 test("an envelope with an invalid from gets no reply", async () => {
@@ -1068,7 +1047,7 @@ test("a sent/ file whose name matches but whose envelope id differs is not quote
 type SendPayload = {
 	to: unknown;
 	body: unknown;
-	envelope?: { id: string; to: string; from: string; kind: string; hops: number };
+	envelope?: { id: string; to: string; from: string; kind: string };
 	error?: string;
 };
 

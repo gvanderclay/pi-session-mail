@@ -21,8 +21,6 @@ export type Envelope = {
 	from: string;
 	to: string;
 	kind: Kind;
-	/** How many times this chain of mail has woken or steered a session with no person typing. */
-	hops: number;
 	/** Request ids this envelope answers; empty for a request. */
 	in_reply_to: string[];
 	status: string;
@@ -80,7 +78,7 @@ function stamp(): number {
 const fileName = (ms: number, id: string) => `${String(ms).padStart(15, "0")}-${id}.json`;
 
 /** How `send` writes an envelope. A reply names what it answers in `inReplyTo`. */
-export type SendOptions = { kind: Kind; hops: number; inReplyTo?: string[]; status?: string };
+export type SendOptions = { kind: Kind; inReplyTo?: string[]; status?: string };
 
 /**
  * Write an envelope to `to`'s inbox: into its `tmp/`, then renamed into its
@@ -94,7 +92,6 @@ export function send(from: string, to: string, body: string, options: SendOption
 	if (!isAddress(from)) throw new Error(`invalid sender address: ${JSON.stringify(from)}`);
 	if (!isAddress(to)) throw new Error(`invalid address: ${JSON.stringify(to)} (expected a session id)`);
 	if (!KINDS.includes(options.kind)) throw new Error(`invalid kind: ${JSON.stringify(options.kind)}`);
-	if (!isHops(options.hops)) throw new Error(`invalid hops: ${JSON.stringify(options.hops)}`);
 	const inReplyTo = options.inReplyTo ?? [];
 	const ms = stamp();
 	const envelope: Envelope = {
@@ -102,7 +99,6 @@ export function send(from: string, to: string, body: string, options: SendOption
 		from,
 		to,
 		kind: options.kind,
-		hops: options.hops,
 		in_reply_to: inReplyTo,
 		status: options.kind === "reply" ? (options.status ?? "done") : "",
 		ts: new Date(ms).toISOString(),
@@ -179,8 +175,6 @@ export function claim(address: string, name: string): string | null {
 /** A request's copy in its sender's `sent/`, with its path. */
 export type SentCopy = { envelope: Envelope; path: string };
 
-const isHops = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value >= 0;
-
 /** The request ids an envelope answers; throws when the list is not a short list of strings. */
 function replyIds(value: unknown): string[] {
 	if (!Array.isArray(value) || !value.every((id) => typeof id === "string"))
@@ -191,8 +185,8 @@ function replyIds(value: unknown): string[] {
 
 /**
  * Parse an envelope value; throws when it is not a well-formed envelope from a
- * valid address. An envelope written before `kind` and `hops` existed is read
- * as a reply when it answers something and as a request otherwise, with hops 0.
+ * valid address. An envelope written before `kind` existed is read as a reply
+ * when it answers something and as a request otherwise.
  * A `kind` this version does not know is read as `message`, so mail from a
  * newer copy is delivered rather than stranded; the original value is dropped.
  */
@@ -206,8 +200,6 @@ function parseEnvelope(value: unknown): Envelope {
 	if (typeof envelope.body !== "string") throw new Error("missing body");
 	if (envelope.kind === undefined) envelope.kind = envelope.in_reply_to.length > 0 ? "reply" : "request";
 	else if (!KINDS.includes(envelope.kind)) envelope.kind = "message";
-	if (envelope.hops === undefined) envelope.hops = 0;
-	else if (!isHops(envelope.hops)) throw new Error(`invalid hops ${JSON.stringify(envelope.hops)}`);
 	return envelope as Envelope;
 }
 

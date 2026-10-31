@@ -131,9 +131,9 @@ The model gets four tools:
 | Tool | Parameters | What it does |
 | --- | --- | --- |
 | `session_mail_list` | none | Lists every running session, in every agent directory: its name (or short id, the first 8 characters of its id, when it has no name), full id, working directory, idle or busy state and whom it is waiting on, and marks the calling session. |
-| `session_mail_ask` | `to`, `message` | Writes an ask (`kind: "ask"`). In a TUI session without `PI_UNATTENDED=1` it returns at once with outcome `background`, sets no `waitingOn`, and the answer arrives as a message. Everywhere else (print, JSON and RPC modes, and a TUI marked unattended, such as a pi-squire delegate) it waits for the answer, which is the result: its status and body, labelled as not an answer when the status is `stopped` or `failed`. The wait ends when the answer arrives, after 10 minutes ("no answer yet"), when the target's running record disappears ("stopped running"), or when the user stops the run; `waitingOn` is set while it waits and cleared in every case. Refused at once, writing nothing, when another ask of this session is waiting, when the target is not running, when the target is waiting on this session, at the [hop limit](#hop-limit), and when `to` does not resolve, is ambiguous or is this session. |
-| `session_mail_reply` | `ask`, `message` | Answers one open ask this session received, at once, with status `done` and the turn's hop count, without ending the run; the asker's `session_mail_ask` returns with it. The answer at settle then leaves that ask out, while the sender's other requests and asks are still answered. Refused, sending nothing, for an ask already answered (by this tool or at settle), for a request (answered at settle), a message or a reply, for an id that never reached this session, and for an empty text. |
-| `session_mail_send` | `to`, `message` | Writes a message (`kind: "message"`) and returns its id. To a running session it is delivered at once; to a closed session, by full id, it waits in that session's inbox and the result says so. Refused when `to` does not resolve, is ambiguous or is this session, when the text is empty, and at the [hop limit](#hop-limit). |
+| `session_mail_ask` | `to`, `message` | Writes an ask (`kind: "ask"`). In a TUI session without `PI_UNATTENDED=1` it returns at once with outcome `background`, sets no `waitingOn`, and the answer arrives as a message. Everywhere else (print, JSON and RPC modes, and a TUI marked unattended, such as a pi-squire delegate) it waits for the answer, which is the result: its status and body, labelled as not an answer when the status is `stopped` or `failed`. The wait ends when the answer arrives, after 10 minutes ("no answer yet"), when the target's running record disappears ("stopped running"), or when the user stops the run; `waitingOn` is set while it waits and cleared in every case. Refused at once, writing nothing, when another ask of this session is waiting, when the target is not running, when the target is waiting on this session, and when `to` does not resolve, is ambiguous or is this session. |
+| `session_mail_reply` | `ask`, `message` | Answers one open ask this session received, at once, with status `done`, without ending the run; the asker's `session_mail_ask` returns with it. The answer at settle then leaves that ask out, while the sender's other requests and asks are still answered. Refused, sending nothing, for an ask already answered (by this tool or at settle), for a request (answered at settle), a message or a reply, for an id that never reached this session, and for an empty text. |
+| `session_mail_send` | `to`, `message` | Writes a message (`kind: "message"`) and returns its id. To a running session it is delivered at once; to a closed session, by full id, it waits in that session's inbox and the result says so. Refused when `to` does not resolve, is ambiguous or is this session, and when the text is empty. |
 
 ## Addressing
 
@@ -223,7 +223,7 @@ down while holding one never answers it.
 
 ## Envelopes
 
-Every envelope is a JSON file with `id`, `from`, `to`, `kind`, `hops`,
+Every envelope is a JSON file with `id`, `from`, `to`, `kind`,
 `in_reply_to`, `status`, `ts` and `body`. `kind` is one of:
 
 - `request`, answered when the recipient settles.
@@ -240,11 +240,12 @@ An envelope whose `in_reply_to` names more than 50 requests (50 is allowed) is
 set aside with a warning, like any other envelope that cannot be read: it stays in `cur/`
 and is not delivered.
 
-`hops` is a non-negative integer counting how many times a chain of mail has
-woken or steered a session with no person typing (see
-[Hop limit](#hop-limit)). An envelope written before `kind` and `hops` existed
-is read as a reply when `in_reply_to` is non-empty and as a request otherwise,
-with hops 0.
+An envelope written before `kind` existed is read as a reply when `in_reply_to`
+is non-empty and as a request otherwise.
+
+There is no hop count or other limit on chains of mail: sessions can keep waking
+each other. An old envelope that still carries a `hops` property is read and
+delivered like any other, and the property is ignored.
 
 A reply's `status` says how the run ended, not whether the job succeeded.
 Requests, asks and messages carry no status.
@@ -254,28 +255,6 @@ Requests, asks and messages carry no status.
 | `done` | the run settled; the body is its answer, opening with a note that the user took over when the request was held across a stop |
 | `stopped` | the user stopped the run before it settled; the body says so, then the partial text. Only asks are answered `stopped`; requests are held instead |
 | `failed` | the run did not do the job, and the body says why: either the run ended on an error (such as an API error Pi's retries gave up on), and the body gives the error, then the partial text; or the session was stopped before it read the request or ask, and nothing was done |
-
-## Hop limit
-
-Each session keeps a hop count for its current turn. It is 0 once the user
-starts or steers the turn: any Pi `input` event, whether typed, sent over RPC,
-or a prompt a command sent. Otherwise it is the highest `hops` plus one among
-the envelopes that started the turn or steered into it, requests and messages
-alike, and a reply a `message:inbound` listener took over. A reply shown
-quietly starts no turn and does not count. The count starts afresh when the
-run settles.
-
-`session_mail_send` and `session_mail_ask` stamp the count on their mail, and
-are refused before anything is written once the count has reached the limit (5
-unless `session-mail.json` says otherwise; see
-[Configuration](#configuration)). The refusal says that a person typing in
-either session starts the count again. Automatic answers carry the count and
-are never refused. A `message:send` is never refused at send time: its consumer
-acts for the user. Emitted while the session is idle it carries 0; during a run
-it carries that run's count, and the session that receives it counts it like
-any other mail, so a chain that reaches the limit is refused there as a loop.
-The limit is a loop guard, not a security boundary: a hand-written envelope
-can claim any `hops`.
 
 ## Pruning
 
@@ -304,18 +283,17 @@ reports `Removed <N> mailbox folders of closed sessions`.
 (`PI_CODING_AGENT_DIR`, or `~/.pi/agent`), so each agent directory sets its own:
 
 ```json
-{ "hopLimit": 5, "pruneAfterDays": 30 }
+{ "pruneAfterDays": 30 }
 ```
 
 | Key | Effect |
 | --- | --- |
-| `hopLimit` | A positive integer: how many hops a chain of sessions waking each other may reach before `session_mail_send` and `session_mail_ask` are refused. Default 5. |
 | `pruneAfterDays` | A positive integer: how many days a closed session's mailbox folder is kept before it is [pruned](#pruning). Default 30. |
 
-The file is read at each send and at session start. A missing file, or one
+The file is read at session start. A missing file, or one
 without a key, means that key's default. An unreadable or invalid file, or an
-invalid value, also means the default (5 hops, 30 days), with one warning per
-session.
+invalid value, also means the default (30 days), with one warning per
+session. A key this version does not know, such as the former `hopLimit`, is ignored.
 
 The only environment variable it reads is the standard `XDG_STATE_HOME`, at
 every call, to place the mail root (see [How mail works](#how-mail-works)). It
@@ -352,15 +330,8 @@ refuse rather than pretend the message was sent.
 | --- | --- | --- |
 | `to` | consumer | the recipient's address: a session id |
 | `body` | consumer | the message text |
-| `envelope` | provider | the written request: `id`, `from`, `to`, `kind` (`"request"`), `hops` (the run's hop count during a run, `0` when idle), `in_reply_to`, `status`, `ts`, `body` |
+| `envelope` | provider | the written request: `id`, `from`, `to`, `kind` (`"request"`), `in_reply_to`, `status`, `ts`, `body` |
 | `error` | provider | why nothing was written: no active session, or an invalid `to` or `body` |
-
-While a run is active, between `agent_start` and `agent_settled`, the request
-carries that run's hop count (see [Hop limit](#hop-limit)), so two models that
-delegate to each other through an extension cannot escape the limit. While the
-session is idle it carries 0, as the example below does. The provider never
-refuses a send for its hop count; the receiving session refuses past the limit
-as a loop.
 
 The request's `id` is what a reply names in its `in_reply_to`, so a consumer
 that wants its answers back should keep it.
@@ -374,7 +345,7 @@ assert.equal(payload.error, undefined);
 assert.ok(payload.envelope, "a provider sets `envelope` before `emit` returns");
 assert.equal(typeof payload.envelope.id, "string");
 assert.equal(payload.envelope.kind, "request");
-assert.equal(payload.envelope.hops, 0);
+assert.equal("hops" in payload.envelope, false);
 ```
 
 ```js no-provider
@@ -400,7 +371,7 @@ listener's handler. The watcher and the poll timer deliver later mail as usual.
 
 | Field | Meaning |
 | --- | --- |
-| `envelope` | the claimed envelope, with `from`, `kind`, `hops`, `in_reply_to`, `status`, `body` and the rest; an old envelope without `kind` or `hops` gets them filled in as described above |
+| `envelope` | the claimed envelope, with `from`, `kind`, `in_reply_to`, `status`, `body` and the rest; an old envelope without `kind` gets it filled in as described above |
 | `path` | the envelope's path in this session's `cur/` |
 | `requests` | a reply's `in_reply_to` requests found in this session's `sent/`, each as `{ envelope, path }`; empty for a request, and shorter than `in_reply_to` when a copy is missing |
 | `handled` | set to `true` by a listener that shows the message itself; `pi-session-mail` then injects nothing |
@@ -476,14 +447,14 @@ root, and other extensions depend on its hooks, so these are stable:
 - The mail root path, `$XDG_STATE_HOME/pi-session-mail/`, or
   `~/.local/state/pi-session-mail/` when `XDG_STATE_HOME` is unset or not
   absolute.
-- The envelope fields (`id`, `from`, `to`, `kind`, `hops`, `in_reply_to`,
+- The envelope fields (`id`, `from`, `to`, `kind`, `in_reply_to`,
   `status`, `ts`, `body`), the kinds (`request`, `reply`, `message`, `ask`)
   and a reply's statuses (`done`, `stopped`, `failed`); see
   [Envelopes](#envelopes).
 - The names of the tools (`session_mail_list`, `session_mail_send`,
   `session_mail_ask`, `session_mail_reply`) and of the `/mailbox`,
   `/mailbox:send` and `/mailbox:prune` commands.
-- The keys of `session-mail.json`, today `hopLimit` and `pruneAfterDays`.
+- The keys of `session-mail.json`, today `pruneAfterDays`.
 
 Changing any of them needs a major version from 1.0 on, and a minor version
 while the package is at 0.x.
