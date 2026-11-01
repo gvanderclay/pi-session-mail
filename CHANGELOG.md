@@ -6,6 +6,11 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Shorter declarations for the four session-mail tools reduce model context use.
+  Delivery, ask waits, reply rules, result fields, and errors are unchanged.
+
 ## [0.6.1] - 2026-10-31
 
 ### Changed

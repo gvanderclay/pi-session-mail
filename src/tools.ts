@@ -126,49 +126,54 @@ const SENDS_MAIL = { readOnlyHint: false, destructiveHint: false, idempotentHint
 const SessionList = Type.Object({
 	sessions: Type.Array(
 		Type.Object({
-			id: Type.String({ description: "The session's full id; pass it as `to`" }),
-			name: Type.Optional(Type.String({ description: "The session name; absent when none is set" })),
+			id: Type.String({ description: "Full session id; usable as `to`" }),
+			name: Type.Optional(Type.String()),
 			cwd: Type.String(),
 			state: Type.Union([Type.Literal("idle"), Type.Literal("busy")]),
 			waitingOn: Type.Optional(
-				Type.String({ description: "The full id of the session this one's ask waits on; absent when none" }),
+				Type.String({ description: "Full session id this session's ask waits on; absent if none" }),
 			),
-			self: Type.Boolean({ description: "True for the calling session" }),
+			self: Type.Boolean({ description: "True for the caller" }),
 		}),
 	),
 });
 
 const SendResult = Type.Object({
-	id: Type.String({ description: "The message's id" }),
-	to: Type.String({ description: "The recipient's full id" }),
-	running: Type.Boolean({ description: "False when the message waits in a closed session's inbox" }),
+	id: Type.String({ description: "Message id" }),
+	to: Type.String({ description: "Recipient's full session id" }),
+	running: Type.Boolean({ description: "False if queued in a closed session's inbox" }),
 });
 
 const asked = {
-	id: Type.String({ description: "The ask's id" }),
-	to: Type.String({ description: "The asked session's full id" }),
+	id: Type.String({ description: "Ask id" }),
+	to: Type.String({ description: "Asked session's full id" }),
 };
 
-/** One variant per {@link AskOutcome}, told apart by `outcome`. */
-const AskResult = Type.Union([
-	Type.Object({
-		...asked,
-		outcome: Type.Literal("answered"),
-		status: Type.String({
-			description: '"done" for an answer; any other status means the run ended otherwise, and body is not an answer',
+const AskResult = Type.Intersect([
+	Type.Object(asked),
+	Type.Union([
+		Type.Object({
+			outcome: Type.Literal("answered"),
+			status: Type.String({
+				description: '"done" means an answer; otherwise the run ended without an answer and body is not one',
+			}),
+			body: Type.String(),
 		}),
-		body: Type.String(),
-	}),
-	Type.Object({ ...asked, outcome: Type.Literal("timed-out") }),
-	Type.Object({ ...asked, outcome: Type.Literal("stopped-running") }),
-	Type.Object({ ...asked, outcome: Type.Literal("stopped-by-user") }),
-	Type.Object({ ...asked, outcome: Type.Literal("background") }),
+		Type.Object({
+			outcome: Type.Union([
+				Type.Literal("timed-out"),
+				Type.Literal("stopped-running"),
+				Type.Literal("stopped-by-user"),
+				Type.Literal("background"),
+			]),
+		}),
+	]),
 ]);
 
 const ReplyResult = Type.Object({
-	id: Type.String({ description: "The reply's id" }),
-	ask: Type.String({ description: "The id of the ask it answers" }),
-	to: Type.String({ description: "The asker's full id" }),
+	id: Type.String({ description: "Reply id" }),
+	ask: Type.String({ description: "Answered ask id" }),
+	to: Type.String({ description: "Asker's full session id" }),
 });
 
 /** One running session as the list shows it. */
@@ -215,7 +220,7 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 		name: "session_mail_list",
 		label: "Session mail: list",
 		description:
-			"List the Pi sessions running on this machine, in every agent root: each one's name (or short id when it has none), full id, working directory, idle or busy state, and whom it is waiting on. The calling session is marked. A session is addressed by its name, its full id, or an id prefix of at least 8 characters.",
+			"List running Pi sessions across all agent roots on this machine, with name (short id if unnamed), full id, cwd, idle/busy state and whom each waits on. Marks the caller. Address running sessions by name, full id or 8+ character id prefix.",
 		parameters: Type.Object({}),
 		outputSchema: SessionList,
 		// Listing deletes the records of sessions whose process is gone, which is housekeeping, not a change.
@@ -249,13 +254,13 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 		name: "session_mail_send",
 		label: "Session mail: send",
 		description:
-			"Send a message to another Pi session on this machine. A running recipient that is idle starts a turn on it; a busy one reads it at its next gap between tool calls. The message expects no answer and nothing is sent back automatically; the recipient answers, if at all, with its own session_mail_send. `to` is a running session's name, an id prefix of at least 8 characters, or a full session id; a closed session is reached only by its full id, and the message waits in its inbox until it starts. session_mail_list shows who is running.",
+			"Send mail to a Pi session on this machine. An idle recipient starts a turn; a busy one reads it at the next tool-call gap. No answer is expected or automatic; any answer uses session_mail_send. Address running sessions by name, full id or 8+ character id prefix. Closed sessions require a full id; mail queues until they start. Discover running sessions with session_mail_list.",
 		parameters: Type.Object({
 			to: Type.String({
-				description: "The recipient: a running session's name, an id prefix of 8+ characters, or a full session id.",
+				description: "Recipient's name or 8+ character id prefix if running; full session id otherwise.",
 			}),
 			message: Type.String({
-				description: "The message text. The recipient sees it labelled as coming from this session.",
+				description: "Message text, labelled as from this session.",
 			}),
 		}),
 		outputSchema: SendResult,
@@ -286,13 +291,13 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 		name: "session_mail_ask",
 		label: "Session mail: ask",
 		description:
-			"Ask another running Pi session on this machine a question. The answer is the other session's final message when its run settles, or an earlier reply it sends. In a session a person is watching, the ask returns at once and the answer arrives later as a message that starts a turn. In an unattended session, such as a delegate, the ask waits up to 10 minutes and the answer comes back as this tool's result. `to` is a running session's name, an id prefix of at least 8 characters, or a full session id; session_mail_list shows who is running. For a note that needs no answer, use session_mail_send.",
+			"Ask a running Pi session on this machine. Its final message at run settle or an early reply answers. In a watched TUI, returns at once; the later answer starts a turn. Unattended sessions, including delegates, wait up to 10 minutes for the answer as this tool's result. Address by name, full id or 8+ character id prefix; discover with session_mail_list. Use session_mail_send for notes needing no answer.",
 		parameters: Type.Object({
 			to: Type.String({
-				description: "The running session to ask: its name, an id prefix of 8+ characters, or its full session id.",
+				description: "Running recipient's name, full id or 8+ character id prefix.",
 			}),
 			message: Type.String({
-				description: "The question. The recipient sees it labelled as coming from this session.",
+				description: "Question, labelled as from this session.",
 			}),
 		}),
 		outputSchema: AskResult,
@@ -354,10 +359,10 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 		name: "session_mail_reply",
 		label: "Session mail: reply",
 		description:
-			"Answer an ask another Pi session sent this session, at once, without ending this run. The asker is waiting, and gets the message as the answer to its ask; the answer this run's last message would otherwise send is then skipped for that ask. `ask` is the ask id its label gives. Each ask is answered once; requests are answered by the extension that consumes them, and messages expect no answer.",
+			"Answer a received ask at once without ending this run. Each ask allows one reply, replacing this run's final-settle answer for it. Use the ask id from its label. Only asks qualify; requests are answered by their consuming extension, and messages expect no answer.",
 		parameters: Type.Object({
-			ask: Type.String({ description: "The ask id, as given in the ask's label." }),
-			message: Type.String({ description: "The answer." }),
+			ask: Type.String({ description: "Ask id from its label." }),
+			message: Type.String({ description: "Answer text." }),
 		}),
 		outputSchema: ReplyResult,
 		// A repeated reply to the same ask is refused and sends nothing.
