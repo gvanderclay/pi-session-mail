@@ -154,6 +154,15 @@ test("every tool declares an output schema, which the harness checks each result
 	assert.ok(Value.Check(ask, { id: "x", to: "y", outcome: "timed-out" }));
 	assert.ok(!Value.Check(ask, { id: "x", to: "y", outcome: "answered" }), "an answer carries status and body");
 	assert.ok(!Value.Check(ask, { id: "x", to: "y", outcome: "gone" }));
+	for (const outcome of ["background", "timed-out", "stopped-running", "stopped-by-user"]) {
+		assert.ok(Value.Check(ask, { id: "x", to: "y", outcome }), outcome);
+		assert.ok(!Value.Check(ask, { to: "y", outcome }), "every outcome requires the ask id");
+		assert.ok(!Value.Check(ask, { id: "x", outcome }), "every outcome requires the recipient id");
+	}
+	assert.ok(Value.Check(ask, { id: "x", to: "y", outcome: "answered", status: "done", body: "yes" }));
+	assert.ok(Value.Check(ask, { id: "x", to: "y", outcome: "answered", status: "failed", body: "no answer" }));
+	assert.ok(!Value.Check(ask, { id: "x", to: "y", outcome: "answered", status: "done" }));
+	assert.ok(!Value.Check(ask, { id: "x", to: "y", outcome: "answered", body: "yes" }));
 });
 
 test("the list shows whom a session waits on", async () => {
