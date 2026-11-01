@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-01
+
 ### Changed
 
 - Shorter declarations for the four session-mail tools reduce model context use.
@@ -255,7 +257,8 @@ author's dotfiles; the changes below are against that copy.
 - CI on Node 22.19 and 24: lint, typecheck, tests, and a check of the
   published file list.
 
-[Unreleased]: https://github.com/gvanderclay/pi-session-mail/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/gvanderclay/pi-session-mail/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/gvanderclay/pi-session-mail/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/gvanderclay/pi-session-mail/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/gvanderclay/pi-session-mail/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/gvanderclay/pi-session-mail/compare/v0.4.0...v0.5.0
