@@ -6,7 +6,7 @@ name: Release
 # publishing (no token; the package's npm settings name this repository and
 # this workflow file) and makes the GitHub release. Publishing waits for lint,
 # typecheck and tests on Node 22.19.x and 24.x, and for a smoke run of the
-# packed package in Pi 1.0.0. Any other push stops after the first job. If
+# packed package in Pi 1.5.0. Any other push stops after the first job. If
 # publishing fails, re-run the failed job: it skips a tag that already exists
 # and a version that is already on npm.
 on:
@@ -59,7 +59,7 @@ jobs:
           unset PI_CODING_AGENT_DIR XDG_STATE_HOME
           pnpm test
 
-  # Pi 1.0.0 matches the @earendil-works/pi-coding-agent devDependency.
+  # Pi 1.5.0 matches the @earendil-works/pi-coding-agent devDependency.
   smoke:
     needs: version
     if: needs.version.outputs.tag != ''
@@ -69,7 +69,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24.x
-      - run: npm install -g @earendil-works/pi-coding-agent@1.0.0
+      - run: npm install -g @earendil-works/pi-coding-agent@1.5.0
       - run: node scripts/smoke.mjs
 
   publish:

@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after } from "node:test";
 
-import { createEventBus, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createEventBus, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { Value } from "typebox/value";
 
@@ -96,6 +96,8 @@ type CustomFactory<T> = (
 
 /** One `ctx.ui.custom` call: the live component and what it resolved with. */
 export type Dialog = {
+	/** Options passed to Pi for this interaction. */
+	options: Parameters<ExtensionContext["ui"]["custom"]>[1];
 	/** Drive it with `handleInput` and read `render(width)`. */
 	component: Component;
 	/** What the component called `done` with; undefined until it does. */
@@ -185,7 +187,10 @@ export function session(
 				confirms.push({ title, message });
 				return answers.confirm.shift() ?? false;
 			},
-			custom: async <T>(factory: CustomFactory<T>): Promise<T> => {
+			custom: async <T>(
+				factory: CustomFactory<T>,
+				options?: Parameters<ExtensionContext["ui"]["custom"]>[1],
+			): Promise<T> => {
 				const settles = Promise.withResolvers<T>();
 				let result: T;
 				const component = await factory(tui, theme, {}, (value) => {
@@ -193,6 +198,7 @@ export function session(
 					settles.resolve(value);
 				});
 				dialogs.push({
+					options,
 					component,
 					result: () => result,
 					press: async (data) => {

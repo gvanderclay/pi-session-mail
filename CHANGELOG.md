@@ -6,6 +6,13 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** Pi 1.5.0 or later is now required; the
+  `@earendil-works/pi-coding-agent` peer dependency is now `>=1.5.0`.
+- The inline `/mailbox` picker reports that Pi is waiting for a mailbox choice
+  to terminals that support program status.
+
 ## [0.6.2] - 2026-11-01
 
 ### Changed

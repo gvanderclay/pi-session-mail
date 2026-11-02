@@ -353,6 +353,7 @@ export default function mailbox(pi: ExtensionAPI) {
 				filter ??= items.some((item) => item.status === "unread") ? "unread" : "all";
 				result = await context.ui.custom<PickResult>(
 					picker({ items, peers, title, now: Date.now(), filter, selectedId, selectedIndex }),
+					{ blocked: { kind: "question", message: "Choose mail in the mailbox" } },
 				);
 			} catch (err) {
 				context.ui.notify(`mailbox: ${(err as Error).message}`, "error");

@@ -39,6 +39,9 @@ test("/mailbox opens the picker titled with the session's name and short address
 	await until(() => a.dialogs.length === 1, "the picker to open");
 	const lines = a.dialogs[0].component.render(80).join("\n");
 	assert.ok(lines.includes(`Mailbox · planner · ${a.id.slice(0, 8)} · all`), lines);
+	assert.deepEqual(a.dialogs[0].options, {
+		blocked: { kind: "question", message: "Choose mail in the mailbox" },
+	});
 	await a.dialogs[0].press("\x1b");
 	await opened;
 	await a.shutdown();
