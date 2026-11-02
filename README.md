@@ -12,7 +12,7 @@ sends it through `message:reply`.
 
 ## Install
 
-Requires Pi 0.80.4 or later; tested with 1.0.0. You also need a writable
+Requires Pi 1.5.0 or later; tested with 1.5.0. You also need a writable
 state directory. The package has no runtime dependencies and no build step.
 
 Install the package from npm:

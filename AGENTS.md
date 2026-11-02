@@ -20,7 +20,7 @@ inbox: the `/mailbox` command, the `session_mail_*` tools, and the
   `PI_CODING_AGENT_DIR`.
 - `node scripts/smoke.mjs` loads the packed package in the `pi` on `PATH` and
   sends one `/mailbox` message, with no API key or model and temporary `HOME`,
-  agent and state folders. CI runs it on Pi 1.0.0 (required) and the latest Pi
+  agent and state folders. CI runs it on Pi 1.5.0 (required) and the latest Pi
   (reporting only). Run it after changing `package.json` `pi` or `files`.
 - A single file: `node --test test/hooks.test.ts`.
 - `node scripts/check-pack.mjs` after changing `package.json` `files` or adding
@@ -34,7 +34,7 @@ inbox: the `/mailbox` command, the `session_mail_*` tools, and the
 - Never commit to `main`: a ruleset refuses pushes there. Work on a branch,
   open a pull request with `gh pr create`, and merge with
   `gh pr merge --squash --auto`; it merges once the required checks in
-  `.github/repo-settings.json` pass (`check`, `macos`, `smoke (1.0.0)` and
+  `.github/repo-settings.json` pass (`check`, `macos`, `smoke (1.5.0)` and
   `pack`). The pull request title becomes the commit message.
 - Repository settings and rulesets live in `.github/repo-settings.json`.
   Change them there, in a pull request, then apply them with
