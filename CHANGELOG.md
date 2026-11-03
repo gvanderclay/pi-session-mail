@@ -6,6 +6,13 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- An absolute `PI_SESSION_MAIL_ROOT` sets the mail root directly, so a test or
+  verification run can isolate its mail without redirecting `XDG_STATE_HOME`,
+  which moves every other tool's state too. Unset or relative, the root is
+  where it was.
+
 ## [0.7.0] - 2026-11-02
 
 ### Changed

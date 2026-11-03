@@ -262,6 +262,26 @@ test("the root is read at call time and ignores a relative XDG_STATE_HOME", asyn
 	}
 });
 
+test("an absolute PI_SESSION_MAIL_ROOT is the mail root itself, read at call time, and a relative one is ignored", async () => {
+	const own = join(dir, "own-mail");
+	try {
+		process.env.PI_SESSION_MAIL_ROOT = own;
+		const a = session(newId("a"));
+		const b = newId("b");
+		await a.request(b, "own root");
+		assert.equal(readdirSync(join(own, b, "new")).length, 1);
+		assert.ok(!existsSync(box(b, "new")));
+
+		process.env.PI_SESSION_MAIL_ROOT = "relative/mail";
+		const c = newId("c");
+		await a.request(c, "back under XDG_STATE_HOME");
+		assert.equal(files(c, "new").length, 1);
+		assert.ok(!existsSync(join("relative", "mail")));
+	} finally {
+		delete process.env.PI_SESSION_MAIL_ROOT;
+	}
+});
+
 test("file names sort in send order", async () => {
 	const a = session(newId("a"));
 	const b = newId("b");

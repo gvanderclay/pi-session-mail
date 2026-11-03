@@ -2,7 +2,8 @@
 //
 // Every session has an address (its session id) and an inbox under
 // `<mail root>/<address>/`, where the mail root
-// (`$XDG_STATE_HOME/pi-session-mail/`, or `~/.local/state/pi-session-mail/`)
+// (`$PI_SESSION_MAIL_ROOT`, else `$XDG_STATE_HOME/pi-session-mail/`, or
+// `~/.local/state/pi-session-mail/`)
 // is shared by every agent directory, so sessions in different ones reach each other.
 // Each running session also announces its name, working directory and idle or
 // busy state in `<mail root>/running/<address>.json` (`running.ts`), which

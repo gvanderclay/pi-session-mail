@@ -20,6 +20,7 @@ import { send } from "../src/store.ts";
 const dir = mkdtempSync(join(tmpdir(), "mailbox-hooks-"));
 process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
 process.env.XDG_STATE_HOME = join(dir, "state");
+delete process.env.PI_SESSION_MAIL_ROOT;
 test.after(() => rmSync(dir, { recursive: true, force: true }));
 
 const root = join(dir, "state", "pi-session-mail");
