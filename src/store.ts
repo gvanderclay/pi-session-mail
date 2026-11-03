@@ -3,8 +3,8 @@
 // the one module tested directly).
 //
 // Layout: <root>/<address>/{tmp,new,cur,sent}/<ms>-<id>.json, where the root
-// is `$XDG_STATE_HOME/pi-session-mail/` (or `~/.local/state/pi-session-mail/`)
-// and is shared by every Pi agent directory on this machine.
+// is `$PI_SESSION_MAIL_ROOT`, else `$XDG_STATE_HOME/pi-session-mail/` (or
+// `~/.local/state/pi-session-mail/`), and is shared by every Pi agent directory on this machine.
 import { randomUUID } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -40,10 +40,14 @@ export const MAX_REPLY_IDS = 50;
 export const isAddress = (value: unknown): value is string => typeof value === "string" && ADDRESS.test(value);
 
 /**
- * The mail root, read at call time so a changed `XDG_STATE_HOME` is honoured.
- * A relative `XDG_STATE_HOME` is ignored, as the XDG spec requires.
+ * The mail root, read at call time so a changed `PI_SESSION_MAIL_ROOT` or
+ * `XDG_STATE_HOME` is honoured. `PI_SESSION_MAIL_ROOT` moves the mail alone, so
+ * an isolated run need not move every tool's state with `XDG_STATE_HOME`.
+ * A relative value of either is ignored, as the XDG spec requires.
  */
 export function mailRoot(): string {
+	const own = process.env.PI_SESSION_MAIL_ROOT;
+	if (own !== undefined && isAbsolute(own)) return own;
 	const state = process.env.XDG_STATE_HOME;
 	const base = state !== undefined && isAbsolute(state) ? state : join(homedir(), ".local", "state");
 	return join(base, "pi-session-mail");

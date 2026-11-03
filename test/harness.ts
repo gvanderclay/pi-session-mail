@@ -24,6 +24,8 @@ process.env.XDG_STATE_HOME = join(dir, "state");
 // inherits PI_UNATTENDED=1, which would make the attended-ask test wait for
 // the 10-minute ask timeout. Tests that need it set it themselves.
 delete process.env.PI_UNATTENDED;
+// A caller's PI_SESSION_MAIL_ROOT would move the mail out of this directory.
+delete process.env.PI_SESSION_MAIL_ROOT;
 after(() => rmSync(dir, { recursive: true, force: true }));
 
 /** The mail root under the current `XDG_STATE_HOME`. */

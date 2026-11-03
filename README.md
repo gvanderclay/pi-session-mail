@@ -75,7 +75,10 @@ at zero.
 Every session has an address, its session id, and an inbox under
 `<mail root>/<address>/{tmp,new,cur,sent}/`. The mail root is
 `$XDG_STATE_HOME/pi-session-mail/`, or `~/.local/state/pi-session-mail/` when
-`XDG_STATE_HOME` is unset or not an absolute path. Mail files are mode `0600`
+`XDG_STATE_HOME` is unset or not an absolute path. An absolute
+`PI_SESSION_MAIL_ROOT` replaces that path for the mail alone, so a test or
+verification run can isolate its mail without moving every other tool's state
+with `XDG_STATE_HOME`. Mail files are mode `0600`
 and folders `0700`, and a session sets the root to `0700` even if it already
 existed, so other users cannot read or write mail, while any process running
 as you can. A session warns at start if its own address folder is open to
@@ -299,8 +302,9 @@ without a key, means that key's default. An unreadable or invalid file, or an
 invalid value, also means the default (30 days), with one warning per
 session. A key this version does not know, such as the former `hopLimit`, is ignored.
 
-It reads two environment variables: the standard `XDG_STATE_HOME`, at every
-call, to place the mail root (see [How mail works](#how-mail-works)), and
+It reads three environment variables: `PI_SESSION_MAIL_ROOT` and the standard
+`XDG_STATE_HOME`, at every call, to place the mail root (see
+[How mail works](#how-mail-works)), and
 `PI_UNATTENDED`, which `session_mail_ask` checks to tell whether a person is
 watching a TUI session (see [the tools](#running-sessions)). It sets no
 environment variable of its own.
@@ -539,7 +543,8 @@ root, and other extensions depend on its hooks, so these are stable:
   `message:scan`, and their payloads as [Hooks](#hooks) describes them.
 - The `[mailbox] From …` label and the `[mailbox] End of the mail …` line that
   frame injected mail.
-- The mail root path, `$XDG_STATE_HOME/pi-session-mail/`, or
+- The mail root path, `$PI_SESSION_MAIL_ROOT` when absolute, else
+  `$XDG_STATE_HOME/pi-session-mail/`, or
   `~/.local/state/pi-session-mail/` when `XDG_STATE_HOME` is unset or not
   absolute.
 - The envelope fields (`id`, `from`, `to`, `kind`, `in_reply_to`,
