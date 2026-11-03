@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-03
+
 ### Added
 
 - An absolute `PI_SESSION_MAIL_ROOT` sets the mail root directly, so a test or
@@ -273,7 +275,8 @@ author's dotfiles; the changes below are against that copy.
 - CI on Node 22.19 and 24: lint, typecheck, tests, and a check of the
   published file list.
 
-[Unreleased]: https://github.com/gvanderclay/pi-session-mail/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/gvanderclay/pi-session-mail/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/gvanderclay/pi-session-mail/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/gvanderclay/pi-session-mail/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/gvanderclay/pi-session-mail/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/gvanderclay/pi-session-mail/compare/v0.6.0...v0.6.1
