@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, test } from "node:test";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 
@@ -163,6 +164,55 @@ test("every tool declares an output schema, which the harness checks each result
 	assert.ok(Value.Check(ask, { id: "x", to: "y", outcome: "answered", status: "failed", body: "no answer" }));
 	assert.ok(!Value.Check(ask, { id: "x", to: "y", outcome: "answered", status: "done" }));
 	assert.ok(!Value.Check(ask, { id: "x", to: "y", outcome: "answered", body: "yes" }));
+});
+
+// Models whose tool changes Pi sends in place, and one it resends the whole tool list for.
+const inPlace = {
+	api: "anthropic-messages",
+	compat: { supportsMidConvoSystemMessages: true, supportsMidConvoToolChanges: true },
+} as unknown as ExtensionContext["model"];
+const resends = { api: "anthropic-messages", compat: {} } as unknown as ExtensionContext["model"];
+const ALL = ["session_mail_ask", "session_mail_list", "session_mail_reply", "session_mail_send"];
+
+test("list and reply stay out of the declared tools where codemode or a cache-keeping tool_search reaches them", async () => {
+	for (const opts of [
+		{ builtins: ["codemode"], model: resends },
+		{ builtins: ["tool_search"], model: inPlace },
+	]) {
+		const a = session(newId(), opts);
+		await a.start();
+		const declared = a.activeTools().filter((name) => name.startsWith("session_mail_"));
+		assert.deepEqual(declared, ["session_mail_ask", "session_mail_send"], JSON.stringify(opts.builtins));
+		// Still callable: codemode scripts and tool_search reach registered tools.
+		assert.match((await a.toolCall("session_mail_list")).content[0].text, /running session/);
+		await a.shutdown();
+	}
+});
+
+test("all four tools are declared where nothing else would reach list and reply without losing the cache", async () => {
+	for (const opts of [{}, { builtins: ["tool_search"], model: resends }]) {
+		const a = session(newId(), opts);
+		await a.start();
+		assert.deepEqual(
+			a.activeTools().filter((name) => name.startsWith("session_mail_")),
+			ALL,
+		);
+		await a.shutdown();
+	}
+	// Switching to a model that resends its tools declares them; switching back keeps them.
+	const b = session(newId(), { builtins: ["tool_search"], model: inPlace });
+	await b.start();
+	await b.selectModel(resends);
+	assert.deepEqual(
+		b.activeTools().filter((name) => name.startsWith("session_mail_")),
+		ALL,
+	);
+	await b.selectModel(inPlace);
+	assert.deepEqual(
+		b.activeTools().filter((name) => name.startsWith("session_mail_")),
+		ALL,
+	);
+	await b.shutdown();
 });
 
 test("the list shows whom a session waits on", async () => {

@@ -62,6 +62,7 @@ type Tool = {
 	description: string;
 	outputSchema?: ToolDefinition["outputSchema"];
 	annotations?: ToolDefinition["annotations"];
+	exposure?: ToolDefinition["exposure"];
 	execute: (id: string, params: unknown, signal: unknown, onUpdate: unknown, ctx: unknown) => Promise<ToolResult>;
 };
 
@@ -111,11 +112,21 @@ export type Dialog = {
 /** One fake Pi session running the extension under `sessionId`. */
 export function session(
 	sessionId: string,
-	opts: { hasUI?: boolean; name?: string; cwd?: string; mode?: "tui" | "print" | "json" | "rpc" } = {},
+	opts: {
+		hasUI?: boolean;
+		name?: string;
+		cwd?: string;
+		mode?: "tui" | "print" | "json" | "rpc";
+		/** Other extensions' tools, such as `codemode` or `tool_search`, registered and active from the start. */
+		builtins?: string[];
+		model?: ExtensionContext["model"];
+	} = {},
 ) {
 	const commands: Record<string, (args: string, ctx: unknown) => Promise<void>> = {};
 	const handlers: Record<string, Handler[]> = {};
 	const tools: Record<string, Tool> = {};
+	/** The tools declared to the model; registering a direct tool activates it, as Pi does. */
+	let active = new Set(opts.builtins ?? []);
 	const sent: Sent[] = [];
 	const notes: string[] = [];
 	const warnings: string[] = [];
@@ -147,6 +158,12 @@ export function session(
 		},
 		registerTool: (tool: Tool) => {
 			tools[tool.name] = tool;
+			if (tool.exposure === undefined || tool.exposure === "direct") active.add(tool.name);
+		},
+		getAllTools: () => [...(opts.builtins ?? []), ...Object.keys(tools)].map((name) => ({ name })),
+		getActiveTools: () => [...active],
+		setActiveTools: (names: string[]) => {
+			active = new Set(names);
 		},
 		// A sent message enters the conversation at once, reported through message_end like Pi does.
 		sendMessage: (message: Sent["message"], options: unknown) => {
@@ -157,6 +174,7 @@ export function session(
 		},
 	};
 	const ctx = {
+		model: opts.model,
 		cwd: opts.cwd ?? dir,
 		hasUI: opts.hasUI ?? true,
 		mode: opts.mode,
@@ -244,6 +262,10 @@ export function session(
 		status: () => statuses.get("mailbox"),
 		statusCalls: () => statusCalls,
 		tools: () => Object.keys(tools).sort(),
+		/** The tools declared to the model now, sorted. */
+		activeTools: () => [...active].sort(),
+		/** The user switches to `model`, as `/model` does. */
+		selectModel: (model: ExtensionContext["model"]) => fire("model_select", { model, source: "set" }),
 		tool: (toolName: string) => tools[toolName],
 		/** Call a registered tool; `signal` stands in for the user stopping the run. */
 		// Pi passes `structuredContent` on unchecked, so every result a test sees is checked against the tool's `outputSchema` here.
