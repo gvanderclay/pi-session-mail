@@ -20,6 +20,7 @@ import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil
 import { Type } from "typebox";
 
 import { DEFAULT_PRUNE_AFTER_DAYS, parseConfig } from "./config.ts";
+import { declareUnlessReachable } from "./deferred.ts";
 import { label, listRunning, type RunningRecord, resolveTo } from "./running.ts";
 import { type Envelope, send } from "./store.ts";
 
@@ -44,6 +45,13 @@ export type Tools = {
 	/** Stop waiting, as when the session shuts down. */
 	abandonAsk: () => void;
 };
+
+/**
+ * Tools left out of every request where a codemode script or `tool_search`
+ * reaches them without costing the prompt cache. send and ask name
+ * session_mail_list, and an ask's label names session_mail_reply.
+ */
+const DEFERRED_TOOLS = ["session_mail_list", "session_mail_reply"];
 
 /** How long an ask waits for its answer (spec Q13). */
 const ASK_TIMEOUT_MS = 10 * 60 * 1000;
@@ -219,6 +227,7 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 	pi.registerTool({
 		name: "session_mail_list",
 		label: "Session mail: list",
+		exposure: "deferred",
 		description:
 			"List running Pi sessions across all agent roots on this machine, with name (short id if unnamed), full id, cwd, idle/busy state and whom each waits on. Marks the caller. Address running sessions by name, full id or 8+ character id prefix.",
 		parameters: Type.Object({}),
@@ -358,6 +367,7 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 	pi.registerTool({
 		name: "session_mail_reply",
 		label: "Session mail: reply",
+		exposure: "deferred",
 		description:
 			"Answer a received ask at once without ending this run. Each ask allows one reply, replacing this run's final-settle answer for it. Use the ask id from its label. Only asks qualify; requests are answered by their consuming extension, and messages expect no answer.",
 		parameters: Type.Object({
@@ -388,6 +398,9 @@ export function registerTools(pi: ExtensionAPI, hooks: ToolHooks): Tools {
 			);
 		},
 	});
+
+	pi.on("session_start", (_event, ctx) => declareUnlessReachable(pi, DEFERRED_TOOLS, ctx.model));
+	pi.on("model_select", (event) => declareUnlessReachable(pi, DEFERRED_TOOLS, event.model));
 
 	return {
 		recordKind(envelope) {

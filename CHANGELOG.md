@@ -6,6 +6,15 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `session_mail_list` and `session_mail_reply` are deferred where reaching
+  them keeps the prompt cache: with active `codemode`, or with `tool_search`
+  on a model Pi adds tools to in place. Their declarations, about 1,200
+  characters, then leave every request; send and ask already name the list
+  tool and an ask's label names the reply tool. Elsewhere all four tools stay
+  declared, and switching to a model that resends its tools declares them.
+
 ## [0.7.1] - 2026-11-03
 
 ### Added

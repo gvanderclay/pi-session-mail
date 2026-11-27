@@ -131,7 +131,12 @@ session left behind by a crash is cleaned up too. The record also holds
 for another process is treated as gone too. A record without `started`, or a
 platform where the start time cannot be read, is judged by the process id alone.
 
-The model gets four tools:
+The model gets four tools. `session_mail_list` and `session_mail_reply` are
+deferred: where `codemode` is active, or `tool_search` is active on a model
+Pi adds tools to in place (so loading one keeps the prompt cache), they stay
+out of every request and are reached by name; otherwise all four are
+declared. `session_mail_send` and `session_mail_ask` name
+`session_mail_list`, and an ask's label names `session_mail_reply`.
 
 | Tool | Parameters | What it does |
 | --- | --- | --- |
